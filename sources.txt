@@ -1,0 +1,3 @@
+burned area: https://mtbs.gov/direct-download
+
+ignition points:https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_FireOccurrenceAndPerimeter_01/MapServer/9
