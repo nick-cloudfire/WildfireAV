@@ -40,29 +40,26 @@ def read_raws(wxs_path: Path) -> pd.DataFrame:
     return df
 
 def geotiff_to_bsq(input_tif: Path, output_bil: Path):
-    input_tif = Path(input_tif)
-    output_bil = Path(output_bil)
-
     cmd = [
         "gdal_translate",
+        "--config", "GDAL_CACHEMAX", "512",     # MB
         "-of", "ENVI",
         "-co", "INTERLEAVE=BSQ",
         str(input_tif),
-        str(output_bil)
+        str(output_bil),
     ]
-
     subprocess.run(cmd, check=True)
-    
-def bsq_to_geotiff(input_bsq: Path, output_tif: Path):
-    input_bsq = Path(input_bsq)
-    output_tif = Path(output_tif)
 
+def bsq_to_geotiff(input_bsq: Path, output_tif: Path):
     cmd = [
         "gdal_translate",
+        "--config", "GDAL_CACHEMAX", "512",     # MB
         "-of", "GTiff",
-        "-co", "COMPRESS=DEFLATE",
+        "-co", "COMPRESS=ZSTD",
+        "-co", "BIGTIFF=YES",
+        "-co", "NUM_THREADS=8",                # try 4 first (not ALL_CPUS)
         str(input_bsq),
-        str(output_tif)
+        str(output_tif),
     ]
     subprocess.run(cmd, check=True)
     
@@ -88,7 +85,7 @@ INPUTS = cfg.INPUTS_SUBDIR_NAME
 
 workspace_folder = BASE_DATA / Path("nelson_csharp/bin/Release/net8.0/nelson_csharp")
 
-for caseId in FIRE_ROOT.iterdir():
+for caseId in sorted(FIRE_ROOT.iterdir()):
     if caseId.is_dir() and caseId.name.isdigit():
         print(f'Folder {caseId}')
         RAWS_FILE   = FIRE_ROOT / caseId / INPUTS / RAWS_FILENAME

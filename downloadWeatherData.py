@@ -179,7 +179,7 @@ def write_wxs(df: pd.DataFrame, out_path: Path, elevation_m: float, start_time: 
                 temp_int = int(round(float(row["temperature_2m"])))
                 rh_int = max(0, min(99, int(round(float(row["relative_humidity_2m"])))))
                 precip_mm = float(row["precipitation"])
-                wspd_kmh_int = int(round(float(row["wind_speed_10m"]) * 3.6))
+                wspd_kmh_int = int(round(float(row["wind_speed_10m"])))
                 wdir_int = int(round(float(row["wind_direction_10m"]))) % 360
                 cloud_int = max(0, min(100, int(round(float(row["cloud_cover"])))))
     
@@ -248,7 +248,7 @@ def main():
                 print(f"[{task.folder_name}] No hourly data returned")
                 return (task.folder_name, "no data")
     
-            ws = np.asarray(hourly["wind_speed_10m"], dtype=float)
+            ws = np.asarray(hourly["wind_speed_10m"], dtype=float)*0.621
             wd = np.asarray(hourly["wind_direction_10m"], dtype=float)
     
             task.inputs_dir.mkdir(parents=True, exist_ok=True)
@@ -256,14 +256,14 @@ def main():
             write_hourly_raster(
                 task.dem_path,
                 task.ws_out,
-                ws[DAYS_BEFORE*24 + task.start_time.hour : len(ws)-24+task.end_time.hour],
+                ws[DAYS_BEFORE*24 + task.start_time.hour : len(ws)-24+task.end_time.hour+1],
                 times,
             )
     
             write_hourly_raster(
                 task.dem_path,
                 task.wd_out,
-                wd[DAYS_BEFORE*24 + task.start_time.hour : len(wd)-24+task.end_time.hour],
+                wd[DAYS_BEFORE*24 + task.start_time.hour : len(wd)-24+task.end_time.hour+1],
                 times,
             )
     

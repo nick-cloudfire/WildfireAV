@@ -29,6 +29,9 @@ from pyproj import Transformer
 import fiona
 import pipelineConfig as cfg
 import os
+import numpy as np
+from rasterio.windows import Window
+from rasterio.transform import xy as transform_xy
 
 # ==========================
 # USER SETTINGS
@@ -70,7 +73,7 @@ LW_MC = 90.0
 
 # Elmfire fixed settings
 DT_METEOROLOGY = 3600.0   # seconds between wx timesteps
-DTDUMP = 3600.0
+DTDUMP = 7200.0
 SIMULATION_DT = 30.0
 TARGET_CFL = 0.2
 
@@ -87,6 +90,114 @@ PATH_TO_GDAL = "/home/nick/miniconda3/envs/elmfire/bin/"
 # ==========================
 # HELPER FUNCTIONS
 # ==========================
+
+def xy_to_rowcol(ds: rasterio.io.DatasetReader, x: float, y: float):
+    """Map map-coordinates (x,y) to integer (row,col) in ds."""
+    row, col = ds.index(x, y)
+    return int(row), int(col)
+
+
+def rowcol_to_center_xy(ds: rasterio.io.DatasetReader, row: int, col: int):
+    """Return the map-coordinates of the center of pixel (row,col)."""
+    x_c, y_c = transform_xy(ds.transform, row, col, offset="center")
+    return float(x_c), float(y_c)
+
+
+def is_valid_fuel(val, nodata, valid_min: float):
+    if val is None:
+        return False
+    if nodata is not None and val == nodata:
+        return False
+    # if val is nan (float nodata), treat as invalid
+    try:
+        if np.isnan(val):
+            return False
+    except Exception:
+        pass
+    return val >= valid_min
+
+
+def snap_ignition_to_nearest_valid_fuel(
+    fuels_tif: Path,
+    x: float,
+    y: float,
+    valid_min: float = 101.0,
+    max_radius_cells: int = 2000,
+):
+    """
+    Snap (x,y) to the center of the nearest pixel in fuels_tif
+    whose value >= valid_min (and not nodata).
+
+    Search expands in square "rings" around the ignition cell.
+    Returns (x_snapped, y_snapped, snapped_bool).
+    """
+    with rasterio.open(fuels_tif) as ds:
+        row0, col0 = xy_to_rowcol(ds, x, y)
+
+        # Clamp to raster bounds (in case ignition is slightly outside)
+        row0 = min(max(row0, 0), ds.height - 1)
+        col0 = min(max(col0, 0), ds.width - 1)
+
+        # Quick check: is the starting cell valid?
+        v0 = ds.read(1, window=Window(col0, row0, 1, 1), masked=False)[0, 0]
+        if is_valid_fuel(v0, ds.nodata, valid_min):
+            x_c, y_c = rowcol_to_center_xy(ds, row0, col0)
+            return x_c, y_c, False  # already valid; not "snapped" elsewhere
+
+        # Expand search radius
+        for r in range(1, max_radius_cells + 1):
+            r0 = max(row0 - r, 0)
+            r1 = min(row0 + r, ds.height - 1)
+            c0 = max(col0 - r, 0)
+            c1 = min(col0 + r, ds.width - 1)
+
+            h = r1 - r0 + 1
+            w = c1 - c0 + 1
+
+            window = Window(c0, r0, w, h)
+            arr = ds.read(1, window=window, masked=False)
+
+            # Build validity mask
+            valid = arr >= valid_min
+            if ds.nodata is not None:
+                valid &= (arr != ds.nodata)
+            # handle NaNs if present
+            if np.issubdtype(arr.dtype, np.floating):
+                valid &= ~np.isnan(arr)
+
+            if not np.any(valid):
+                continue
+
+            # Among valid cells, choose the one with minimum squared distance to (row0,col0)
+            vr, vc = np.where(valid)
+            rows = vr + r0
+            cols = vc + c0
+
+            dr = rows - row0
+            dc = cols - col0
+            d2 = dr * dr + dc * dc
+            k = int(np.argmin(d2))
+
+            best_row = int(rows[k])
+            best_col = int(cols[k])
+
+            x_c, y_c = rowcol_to_center_xy(ds, best_row, best_col)
+            return x_c, y_c, True
+
+    raise RuntimeError(
+        f"No valid fuel (>= {valid_min}) found within radius {max_radius_cells} cells of ignition."
+    )
+
+
+def latlon_from_dem_xy(dem_path: Path, x: float, y: float):
+    """Convert DEM CRS (x,y) to (lat,lon) in EPSG:4326."""
+    with rasterio.open(dem_path) as ds:
+        dem_crs = ds.crs
+    if dem_crs is None:
+        raise ValueError(f"DEM at {dem_path} has no CRS; cannot compute lat/lon.")
+    transformer = Transformer.from_crs(dem_crs, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(x, y)
+    return float(lat), float(lon)
 
 def compute_domain_from_dem(dem_path: Path):
     """
@@ -288,6 +399,7 @@ def main():
     print(f"Loaded {len(df)} records from {FIRE_CSV}\n")
 
     for idx, row in df.iterrows():
+
         folder_id = int(row[FOLDER_COL])
         folder_name = f"{folder_id:05d}"
         case_folder = (root / folder_name).resolve()
@@ -298,6 +410,9 @@ def main():
         ign_shp = case_folder / "ignition_point.gpkg"
 
         print(f"[{idx}] Case folder: {case_folder}")
+        if not case_folder.exists():
+            print(f"{case_folder} does not exist, skipping.")
+            continue
         
         if not scratch_folder.exists():
             os.mkdir(scratch_folder)
@@ -338,20 +453,43 @@ def main():
         # Domain info from DEM
         epsg_str, cellsize, xll, yll = compute_domain_from_dem(dem_path)
 
-        # Ignition point in DEM CRS for X_IGN / Y_IGN
+        # Ignition point in DEM CRS for X_IGN / Y_IGN (initial)
         try:
             x_ign, y_ign = get_ignition_xy_from_shp(dem_path, ign_shp)
-            print(f"  Ignition (DEM CRS): X={x_ign:.2f}, Y={y_ign:.2f}")
+            print(f"  Ignition (DEM CRS, raw): X={x_ign:.2f}, Y={y_ign:.2f}")
         except Exception as e:
             print(f"  Error reading ignition point (DEM CRS): {e}")
             continue
-
-        # Ignition point in lat/lon for LATITUDE / LONGITUDE
+        
+        # Snap ignition to nearest valid fuel cell center (fuel >= 101)
+        fuels_path = inputs_folder / "fbfm40.tif"
+        if not fuels_path.exists():
+            print(f"  Fuels not found at {fuels_path}, skipping.")
+            continue
+        
         try:
-            lat, lon = get_ignition_latlon(ign_shp)
-            print(f"  Ignition (lat/lon): lat={lat:.6f}, lon={lon:.6f}")
+            x_snap, y_snap, moved = snap_ignition_to_nearest_valid_fuel(
+                fuels_tif=fuels_path,
+                x=x_ign,
+                y=y_ign,
+                valid_min=101.0,
+                max_radius_cells=2000,
+            )
+            if moved:
+                print(f"  Ignition snapped to valid fuel cell center: X={x_snap:.2f}, Y={y_snap:.2f}")
+            else:
+                print(f"  Ignition already on valid fuel cell (centered): X={x_snap:.2f}, Y={y_snap:.2f}")
+            x_ign, y_ign = x_snap, y_snap
         except Exception as e:
-            print(f"  Error reading ignition lat/lon: {e}")
+            print(f"  Error snapping ignition to valid fuel: {e}")
+            continue
+
+        # Ignition point in lat/lon for LATITUDE / LONGITUDE (from snapped X/Y)
+        try:
+            lat, lon = latlon_from_dem_xy(dem_path, x_ign, y_ign)
+            print(f"  Ignition (lat/lon, snapped): lat={lat:.6f}, lon={lon:.6f}")
+        except Exception as e:
+            print(f"  Error computing ignition lat/lon from snapped point: {e}")
             continue
 
         # CURRENT_YEAR and HOUR_OF_YEAR from ignition time
