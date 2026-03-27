@@ -1,120 +1,50 @@
-# -*- coding: utf-8 -*-
+# processScarsAndPoints.py
 """
-Created on Thu Dec 11 15:34:48 2025
+Step 1 of setupPipeline: match MTBS burn perimeters to USFS ignition points.
 
-@author: NickKalogeropoulos
+Algorithm
+---------
+1. Load MTBS perimeters, filter by area threshold and fire-year range.
+2. Load USFS ignition points, filter by year range.
+3. Normalise fire names (uppercase, alphanumeric only) for name matching.
+4. Inner-join on normalised name.
+5. Filter by date proximity (|point_discovery - perim_ignition| <= DAY_TOLERANCE).
+6. Spatial filter: point must lie within the matched polygon.
+
+Outputs (written to the current working directory)
+--------------------------------------------------
+- perimeters_ignitions.gpkg  – matched perimeters
+- all_ignitions.gpkg         – matched ignition points
 """
+
+import re
 
 import geopandas as gpd
 import pandas as pd
-import re
+
 import pipelineConfig
 
-# -----------------------------------------------------------
-# Settings
-# -----------------------------------------------------------
-input_file          = pipelineConfig.MTBS_PERIMS_RAW   
-output_perims_file  = pipelineConfig.MTBS_PERIMS_WITH_IGNITIONS  
-threshold           = pipelineConfig.MTBS_AREA_THRESHOLD_ACRES  
-ACRES_FIELD         = pipelineConfig.MTBS_ACRES_FIELD
-points_file         = pipelineConfig.USFS_POINTS_RAW
-output_points_file  = pipelineConfig.USFS_POINTS_MATCHED
-PERIM_NAME_FIELD    = pipelineConfig.PERIM_NAME_FIELD
-PERIM_DATE_FIELD    = pipelineConfig.PERIM_DATE_FIELD
-POINT_NAME_FIELD    = pipelineConfig.POINT_NAME_FIELD
-POINT_DISC_FIELD    = pipelineConfig.POINT_DISC_FIELD 
-POINT_OUT_FIELD     = pipelineConfig.POINT_OUT_FIELD   
-MIN_YEAR            = pipelineConfig.MIN_FIRE_YEAR                      
-MAX_YEAR            = pipelineConfig.MAX_FIRE_YEAR  
-DAY_TOLERANCE       = pipelineConfig.DAY_TOLERANCE_DAYS  
 
-def check_field_exists(field: str, dataset: gpd.GeoDataFrame) -> None:
-    if field not in dataset.columns:
-        raise ValueError(f"Field '{field}' not found in the input shapefile.Available fields: {list(dataset.columns)}")
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def normalize_name(name: str) -> str:
+def _check_field(field: str, gdf: gpd.GeoDataFrame) -> None:
+    if field not in gdf.columns:
+        raise ValueError(
+            f"Field '{field}' not found. Available: {list(gdf.columns)}"
+        )
+
+
+def _normalize_name(name: str) -> str | None:
+    """Return uppercase alphanumeric fire name, or None for invalid/unnamed."""
     if not isinstance(name, str):
         return None
-    name = name.upper()
-    name_norm = re.sub(r"[^A-Z0-9]", "", name)
-    if name_norm == "UNNAMED":
-        return None
-    return name_norm
+    normed = re.sub(r"[^A-Z0-9]", "", name.upper())
+    return None if normed == "UNNAMED" else normed
 
-# -----------------------------------------------------------
-# 0. Process Perimeters
-# -----------------------------------------------------------
 
-perims = gpd.read_file(input_file)
-check_field_exists(ACRES_FIELD,perims)
-check_field_exists(PERIM_NAME_FIELD, perims)
-check_field_exists(PERIM_DATE_FIELD, perims)
-
-perims_acres = perims[perims[ACRES_FIELD] > threshold].copy()
-
-perims_acres[PERIM_DATE_FIELD] = pd.to_datetime(perims_acres[PERIM_DATE_FIELD], errors="coerce", utc=True)
-perims_acres["ign_year"] = perims_acres[PERIM_DATE_FIELD].dt.year
-perims_acres = perims_acres[(perims_acres["ign_year"] >= MIN_YEAR) & (perims_acres["ign_year"] <= MAX_YEAR)].copy()
-
-perims_acres["name_norm"] = perims_acres[PERIM_NAME_FIELD].apply(normalize_name)
-perims_valid = perims_acres.dropna(subset=["name_norm", PERIM_DATE_FIELD]).copy()
-
-# Add an explicit perimeter index to track which perims get matched
-perims_valid = perims_valid.reset_index().rename(columns={"index": "perim_idx"})
-perims_valid = perims_valid.set_index("perim_idx", drop=False)
-
-print(f"Perimeters with valid name within year and area range: {len(perims_valid)} of {len(perims)}")
-
-del perims
-
-# -----------------------------------------------------------
-# 2. Process Ignition Points
-# -----------------------------------------------------------
-points = gpd.read_file(points_file)
-check_field_exists(POINT_NAME_FIELD, points)
-check_field_exists(POINT_DISC_FIELD, points)
-check_field_exists(POINT_OUT_FIELD, points)
-
-points[POINT_DISC_FIELD] = pd.to_datetime(points[POINT_DISC_FIELD], errors="coerce", utc=True)
-points[POINT_OUT_FIELD] = pd.to_datetime(points[POINT_OUT_FIELD], errors="coerce", utc=True)
-
-points["disc_year"] = points[POINT_DISC_FIELD].dt.year
-points = points[(points["disc_year"] >= MIN_YEAR) & (points["disc_year"] <= MAX_YEAR)].copy()
-points["name_norm"] = points[POINT_NAME_FIELD].apply(normalize_name)
-points = points.dropna(subset=["name_norm"]).copy()
-points_valid = points.dropna(subset=["name_norm", POINT_DISC_FIELD, POINT_OUT_FIELD]).copy()
-
-print(f"Points with valid name within year range: {len(points_valid)} of {len(points)}")
-
-# Ensure CRS matches for spatial tests
-if perims_valid.crs != points_valid.crs:
-    print(f"Reprojecting points from {points_valid.crs} to {perims_valid.crs}")
-    points_valid = points_valid.to_crs(perims_valid.crs)
-
-points_valid = points_valid.reset_index().rename(columns={"index": "pt_idx"})
-points_valid = points_valid.set_index("pt_idx", drop=False)
-
-# -----------------------------------------------------------
-# 3. Create Merged Dataset
-# -----------------------------------------------------------
-
-# Save point and  geometry in a separate column
-points_valid["geom_pt"] = points_valid.geometry
-points_df = gpd.GeoDataFrame(points_valid.drop(columns="geometry"))
-perims_valid["geom_perim"] = perims_valid.geometry
-perims_df = gpd.GeoDataFrame(perims_valid.drop(columns="geometry"))
-merged = points_df.merge(perims_df, on="name_norm", how="left")
-
-date_diff = (merged[POINT_DISC_FIELD] - merged[PERIM_DATE_FIELD]).dt.days.abs()
-mask_time = merged[PERIM_DATE_FIELD].notna() & (date_diff <= DAY_TOLERANCE)
-merged_time_filtered = merged[mask_time].copy()
-
-print(f"Point–perimeter matches after name and day filter: {len(merged_time_filtered)}")
-
-# -----------------------------------------------------------
-# 4. Spatial rule: point must be inside the matched polygon
-# -----------------------------------------------------------
-def point_inside_polygon(row):
+def _point_inside_polygon(row) -> bool:
     pt = row["geom_pt"]
     poly = row["geom_perim"]
     if pt is None or poly is None:
@@ -124,22 +54,112 @@ def point_inside_polygon(row):
     except Exception:
         return False
 
-def main():
-    merged_time_filtered["inside"] = merged_time_filtered.apply(point_inside_polygon, axis=1)
-    merged_spatial = merged_time_filtered[merged_time_filtered["inside"]].copy()
-    
-    matched_point_idxs = merged_spatial["pt_idx"].unique()
-    points_matched = points_df.loc[matched_point_idxs].copy()
-    print(f"Unique points matched (after spatial filter): {len(points_matched)}")
-    
-    matchedperim_idxs = merged_spatial["perim_idx"].astype(int).unique()
-    perims_matched = perims_df.loc[matchedperim_idxs].copy()
-    print(f"Unique perimeters with at least one ignition point: {len(perims_matched)}")
-    
-    perims_matched.to_file(output_perims_file, index=False)
-    print(f"Filtered perimeters saved to: {output_perims_file}")
-    points_matched.to_file(output_points_file, index=False)
-    print(f"Filtered points saved to: {output_points_file}")
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    input_file         = pipelineConfig.MTBS_PERIMS_RAW
+    output_perims_file = pipelineConfig.MTBS_PERIMS_WITH_IGNITIONS   # full path under FIRE_ROOT_LOGIN_NODE
+    output_points_file = pipelineConfig.USFS_POINTS_MATCHED          # full path under FIRE_ROOT_LOGIN_NODE
+    threshold          = pipelineConfig.MTBS_AREA_THRESHOLD_ACRES
+    points_file        = pipelineConfig.USFS_POINTS_RAW
+    acres_field        = pipelineConfig.MTBS_ACRES_FIELD
+    perim_name_field   = pipelineConfig.PERIM_NAME_FIELD
+    perim_date_field   = pipelineConfig.PERIM_DATE_FIELD
+    point_name_field   = pipelineConfig.POINT_NAME_FIELD
+    point_disc_field   = pipelineConfig.POINT_DISC_FIELD
+    point_out_field    = pipelineConfig.POINT_OUT_FIELD
+    min_year           = pipelineConfig.MIN_FIRE_YEAR
+    max_year           = pipelineConfig.MAX_FIRE_YEAR
+    day_tolerance      = pipelineConfig.DAY_TOLERANCE_DAYS
+
+    # ------------------------------------------------------------------
+    # 1. Load and filter perimeters
+    # ------------------------------------------------------------------
+    perims = gpd.read_file(input_file)
+    for f in (acres_field, perim_name_field, perim_date_field):
+        _check_field(f, perims)
+
+    perims = perims[perims[acres_field] > threshold].copy()
+    perims[perim_date_field] = pd.to_datetime(
+        perims[perim_date_field], errors="coerce", utc=True
+    )
+    perims["ign_year"] = perims[perim_date_field].dt.year
+    perims = perims[
+        (perims["ign_year"] >= min_year) & (perims["ign_year"] <= max_year)
+    ].copy()
+    perims["name_norm"] = perims[perim_name_field].apply(_normalize_name)
+    perims = perims.dropna(subset=["name_norm", perim_date_field]).copy()
+    perims = perims.reset_index().rename(columns={"index": "perim_idx"})
+    perims = perims.set_index("perim_idx", drop=False)
+    print(f"Perimeters after area/year/name filter: {len(perims)}")
+
+    # ------------------------------------------------------------------
+    # 2. Load and filter ignition points
+    # ------------------------------------------------------------------
+    points = gpd.read_file(points_file)
+    for f in (point_name_field, point_disc_field, point_out_field):
+        _check_field(f, points)
+
+    points[point_disc_field] = pd.to_datetime(
+        points[point_disc_field], errors="coerce", utc=True
+    )
+    points[point_out_field] = pd.to_datetime(
+        points[point_out_field], errors="coerce", utc=True
+    )
+    points["disc_year"] = points[point_disc_field].dt.year
+    points = points[
+        (points["disc_year"] >= min_year) & (points["disc_year"] <= max_year)
+    ].copy()
+    points["name_norm"] = points[point_name_field].apply(_normalize_name)
+    points = points.dropna(
+        subset=["name_norm", point_disc_field, point_out_field]
+    ).copy()
+    points = points.reset_index().rename(columns={"index": "pt_idx"})
+    points = points.set_index("pt_idx", drop=False)
+    print(f"Points after year/name filter: {len(points)}")
+
+    if perims.crs != points.crs:
+        print(f"Reprojecting points from {points.crs} to {perims.crs}")
+        points = points.to_crs(perims.crs)
+
+    # ------------------------------------------------------------------
+    # 3. Name + date join
+    # ------------------------------------------------------------------
+    points["geom_pt"] = points.geometry
+    points_df = gpd.GeoDataFrame(points.drop(columns="geometry"))
+
+    perims["geom_perim"] = perims.geometry
+    perims_df = gpd.GeoDataFrame(perims.drop(columns="geometry"))
+
+    merged = points_df.merge(perims_df, on="name_norm", how="left")
+    date_diff = (merged[point_disc_field] - merged[perim_date_field]).dt.days.abs()
+    mask_time = merged[perim_date_field].notna() & (date_diff <= day_tolerance)
+    merged_time = merged[mask_time].copy()
+    print(f"Matches after name + date filter: {len(merged_time)}")
+
+    # ------------------------------------------------------------------
+    # 4. Spatial filter: point must lie inside matched polygon
+    # ------------------------------------------------------------------
+    merged_time["inside"] = merged_time.apply(_point_inside_polygon, axis=1)
+    merged_spatial = merged_time[merged_time["inside"]].copy()
+
+    matched_pt_idxs = merged_spatial["pt_idx"].unique()
+    points_matched = points_df.loc[matched_pt_idxs].copy()
+    print(f"Unique matched points (after spatial filter): {len(points_matched)}")
+
+    matched_perim_idxs = merged_spatial["perim_idx"].astype(int).unique()
+    perims_matched = perims_df.loc[matched_perim_idxs].copy()
+    print(f"Unique matched perimeters: {len(perims_matched)}")
+
+    perims_matched.to_file(output_perims_file, index=False)
+    print(f"Saved perimeters to: {output_perims_file}")
+
+    points_matched.to_file(output_points_file, index=False)
+    print(f"Saved points to: {output_points_file}")
+
+
+if __name__ == "__main__":
     main()

@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-ONE multi-page PDF: ELMFIRE vs FARSITE (one page per case folder)
+One multi-page PDF: model comparison validation report (one page per case folder).
 
-User-specified paths:
-- ROOT_DIR = FIRE_ROOT
-- ELMFIRE TOA:  <case>/outputs/time_of_arrival_*.tif (newest)
-- FARSITE  TOA: <case>/farsite/outputs/farsite_Arrival Time.tif
-- .data:        <case>/<case>.data
-- Satellite points: per-case gpkg (from pipelineConfig if present)
+Models are defined in MODELS below — add or remove entries to cover any
+combination of simulators without touching the rest of the script.
 
-Key fixes vs your previous run:
-- FARSITE path is exact + always processed (no “candidates” guessing)
-- TOA burn masks treat nodata explicitly
-- Satellite read is per-case (no master CSV); discovery_dt = earliest in-burn hotspot
-- Area evolution normalization uses true observed area (equal-area CRS) + final model areas + final satellite area
-- If rasters are in geographic CRS, areas/curves will be wrong -> raises with clear message
+Page layout (A4 landscape)
+--------------------------
+Left   : burn-mask map (all models + observed outline + ignition marker)
+Top-right  : text block (file paths + metrics table)
+Bottom-right: area-evolution curves (sim-time axis + satellite datetime axis)
+Suptitle: fire name, year, case ID
 """
 
 from __future__ import annotations
@@ -39,103 +35,170 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import matplotlib.dates as mdates
 
+import pipelineConfig as PC
+from case_metadata import read_case_metadata
+
 log = logging.getLogger("validation")
 
 mpl.rcParams["pdf.fonttype"] = 42
-mpl.rcParams["ps.fonttype"] = 42
-mpl.rcParams["font.family"] = "DejaVu Sans Mono"
+mpl.rcParams["ps.fonttype"]  = 42
+mpl.rcParams["font.family"]  = "DejaVu Sans Mono"
 
-M2_TO_ACRES = 0.000247105381
+M2_TO_ACRES     = 0.000247105381
+AREA_CRS        = "EPSG:5070"
+_UNIT_TO_HOURS  = {"s": 1 / 3600.0, "sec": 1 / 3600.0, "min": 1 / 60.0, "h": 1.0, "hr": 1.0}
 
-# -------------------------
-# USER INPUTS (as you specified)
-# -------------------------
-ROOT_DIR = Path(r"/home/nick/elmfire_validation/FirePairs")  # <-- set FIRE_ROOT here
-OUT_PDF = ROOT_DIR / "elmfire_vs_farsite_validation_report.pdf"
+# ---------------------------------------------------------------------------
+# Model configuration
+# ---------------------------------------------------------------------------
+# Add / remove / reorder entries freely — the rest of the script adapts.
+# toa_rel  : path relative to case_dir; use forward slashes.
+# is_glob  : if True, treat toa_rel as a glob and pick the newest match.
+# toa_unit : time unit stored in the TOA raster ("s", "min", or "h").
+# color    : RGB tuple used for the burn mask and curve.
+# alpha    : transparency of the burn-mask overlay on the map.
+# ---------------------------------------------------------------------------
 
-ELM_OUTPUTS_SUBDIR = "outputs"
-ELM_TOA_GLOB = "time_of_arrival_*.tif"
-ELM_BAND = 1
+@dataclass
+class ModelConfig:
+    label:    str
+    toa_rel:  str
+    band:     int   = 1
+    toa_unit: str   = "s"
+    is_glob:  bool  = False
+    color:    tuple = (1.0, 0.0, 0.0)
+    alpha:    float = 0.35
 
-FARSITE_TOA_REL = Path("farsite/outputs/farsite_Arrival Time.tif")
-FAR_BAND = 1
+    def find_toa(self, case_dir: Path) -> Path | None:
+        if self.is_glob:
+            parent, pattern = self.toa_rel.rsplit("/", 1)
+            try:
+                return _newest_glob(case_dir / parent, pattern)
+            except FileNotFoundError:
+                return None
+        p = case_dir / self.toa_rel
+        return p if p.exists() else None
 
-BURN_THRESHOLD = 1.0
-ALL_TOUCHED_OBS = False
+    @property
+    def scale_to_hours(self) -> float:
+        return _UNIT_TO_HOURS.get(self.toa_unit.lower(), 1 / 3600.0)
 
+    @property
+    def rgba(self) -> tuple:
+        return (*self.color, self.alpha)
+
+
+MODELS: list[ModelConfig] = [
+    ModelConfig(
+        label    = "ELMFIRE",
+        toa_rel  = "outputs/time_of_arrival_*.tif",
+        band     = 1,
+        toa_unit = "s",
+        is_glob  = True,
+        color    = (1.0, 0.0, 0.0),
+        alpha    = 0.35,
+    ),
+    ModelConfig(
+        label    = "FARSITE",
+        toa_rel  = "farsite/outputs/farsite_Arrival Time.tif",
+        band     = 1,
+        toa_unit = "min",
+        color    = (0.0, 0.4, 1.0),
+        alpha    = 0.35,
+    ),
+]
+
+# ---------------------------------------------------------------------------
+# Other user-configurable settings
+# ---------------------------------------------------------------------------
+
+ROOT_DIR         = Path(r"/home/nick/elmfire_validation/FirePairs")
+OUT_PDF          = ROOT_DIR / "validation_report.pdf"
+
+BURN_THRESHOLD   = 1.0
+ALL_TOUCHED_OBS  = False
 CURVE_MAX_POINTS = 300
 MODEL_CURVE_BINS = 600
-TOA_TIME_UNIT = "s"
 
-AREA_CRS = "EPSG:5070"  # for true areas + normalization
-
-import pipelineConfig as PC  # type: ignore
-
-FIRESCAR_NAME = getattr(PC, "BURN_SHAPE_NAME", "firescar.gpkg")
-IGNITION_NAME = getattr(PC, "IGNITION_POINT_SHP_NAME", "ignition_point.gpkg")
-
-SAT_ENABLED = True
-SAT_GPKG_NAME = getattr(PC, "CASE_SAT_GPKG_NAME", "satellite_points.gpkg")
-SAT_LAYER = "points_in_burn"
-SAT_DATE_COL = getattr(PC, "SAT_DATE_COL", "ACQ_DATE")
-SAT_TIME_COL = getattr(PC, "SAT_TIME_COL", "ACQ_TIME")
-
-SAT_CHAIN_MAX_GAP = pd.Timedelta(days=float(getattr(PC, "SAT_CHAIN_MAX_GAP_DAYS", 7)))
-SAT_BUFFER_M = float(getattr(PC, "SAT_HOTSPOT_BUFFER_DIST", 200))
-SAT_COVERAGE_FRAC = float(getattr(PC, "COVERAGE_FRACTION", 0.9))
+FIRESCAR_NAME  = getattr(PC, "BURN_SHAPE_NAME",            "firescar.gpkg")
+IGNITION_NAME  = getattr(PC, "IGNITION_POINT_SHP_NAME",    "ignition_point.gpkg")
+SAT_ENABLED    = True
+SAT_GPKG_NAME  = getattr(PC, "CASE_SAT_GPKG_NAME",         "satellite_points.gpkg")
+SAT_LAYER      = "points_in_burn"
+SAT_DATE_COL   = getattr(PC, "SAT_DATE_COL",               "ACQ_DATE")
+SAT_TIME_COL   = getattr(PC, "SAT_TIME_COL",               "ACQ_TIME")
+SAT_CHAIN_MAX_GAP   = pd.Timedelta(days=float(getattr(PC, "SAT_CHAIN_MAX_GAP_DAYS",   7)))
+SAT_BUFFER_M        = float(getattr(PC, "SAT_HOTSPOT_BUFFER_DIST", 200))
+SAT_COVERAGE_FRAC   = float(getattr(PC, "COVERAGE_FRACTION",        0.9))
 
 
+# ---------------------------------------------------------------------------
+# Case data container
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Case:
-    case_id: str
-    elm_toa: Path
-    far_toa: Path | None
-    obs_geom_base: Any
-    ign_base: gpd.GeoDataFrame
-    tstop_h: float | None
-    tstop_src: str | None
+    case_id:       str
+    fire_name:     str | None
+    fire_year:     int | None
+    model_toas:    dict[str, Path | None]   # label → toa path
+    obs_geom_base: Any                      # shapely geom in ELMFIRE CRS
+    ign_base:      gpd.GeoDataFrame
+    tstop_h:       float | None
+    tstop_src:     str | None
 
-    obs_true_m2: float | None = None  # observed polygon area in AREA_CRS
-    discovery_dt: pd.Timestamp | None = None
-    sat_times: list[pd.Timestamp] = field(default_factory=list)
-    sat_areas_m2: list[float] = field(default_factory=list)
-    sat_end: pd.Timestamp | pd.NaT = pd.NaT
-    sat_target_m2: float | None = None
+    obs_true_m2:   float | None             = None
+    discovery_dt:  pd.Timestamp | None      = None
+    sat_times:     list[pd.Timestamp]       = field(default_factory=list)
+    sat_areas_m2:  list[float]              = field(default_factory=list)
+    sat_end:       pd.Timestamp | pd.NaT    = pd.NaT
+    sat_target_m2: float | None             = None
+    metrics:       dict[str, Any]           = field(default_factory=dict)
 
-    metrics: dict[str, Any] = field(default_factory=dict)
 
+# ---------------------------------------------------------------------------
+# File helpers
+# ---------------------------------------------------------------------------
 
-# -------------------------
-# File helpers (minimal + deterministic)
-# -------------------------
-def newest_glob(parent: Path, pattern: str) -> Path:
+def _newest_glob(parent: Path, pattern: str) -> Path:
     hits = sorted(parent.glob(pattern), key=lambda p: p.stat().st_mtime)
     if not hits:
         raise FileNotFoundError(f"No match: {parent}/{pattern}")
     return hits[-1]
 
 
-def tstop_from_case_data(case_dir: Path) -> tuple[float | None, str | None]:
-    data = case_dir / f"{case_dir.name}.data"  # exact as you specified
-    if not data.exists():
-        return None, None
-    txt = data.read_text(errors="ignore")
-    m = re.search(r"SIMULATION_TSTOP\s*=\s*([0-9]+(?:\.[0-9]+)?)", txt)
-    return ((float(m.group(1)) / 3600.0) if m else None), str(data)
-
-def rel_or_name(p: Path, base: Path) -> str:
+def _rel_or_name(p: Path, base: Path) -> str:
     try:
         return str(p.relative_to(base))
     except Exception:
         return p.name
 
 
-# -------------------------
+def _tstop_hours(case_dir: Path) -> tuple[float | None, str | None]:
+    data = case_dir / f"{case_dir.name}.data"
+    if not data.exists():
+        return None, None
+    m = re.search(r"SIMULATION_TSTOP\s*=\s*([0-9]+(?:\.[0-9]+)?)", data.read_text(errors="ignore"))
+    return (float(m.group(1)) / 3600.0 if m else None), str(data)
+
+
+def _fire_name_year(case_dir: Path) -> tuple[str | None, int | None]:
+    try:
+        meta = read_case_metadata(case_dir)
+        name = meta.get("perim_name") or meta.get("point_name")
+        raw  = meta.get("perim_ignition")
+        year = pd.to_datetime(raw, errors="coerce").year if raw else None
+        return (str(name) if name else None), (int(year) if year and not pd.isna(year) else None)
+    except Exception:
+        return None, None
+
+
+# ---------------------------------------------------------------------------
 # Geometry
-# -------------------------
-def read_firescar_union(path: Path) -> gpd.GeoSeries:
-    gdf = gpd.read_file(path)
+# ---------------------------------------------------------------------------
+
+def _firescar_union(path: Path) -> gpd.GeoSeries:
+    gdf  = gpd.read_file(path)
     if gdf.empty:
         raise ValueError(f"No geometries in {path}")
     geom = gdf.geometry.union_all()
@@ -146,44 +209,39 @@ def read_firescar_union(path: Path) -> gpd.GeoSeries:
     return gpd.GeoSeries([geom], crs=gdf.crs)
 
 
-def read_ignition(case_dir: Path) -> gpd.GeoDataFrame:
+def _read_ignition(case_dir: Path) -> gpd.GeoDataFrame:
     p = case_dir / IGNITION_NAME
     if not p.exists():
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
     gdf = gpd.read_file(p)
-    if gdf.empty:
-        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs or "EPSG:4326")
-    return gdf
+    return gdf if not gdf.empty else gpd.GeoDataFrame(geometry=[], crs=gdf.crs or "EPSG:4326")
 
 
-# -------------------------
-# Raster masks + metrics
-# -------------------------
-def require_projected(ds: rasterio.io.DatasetReader, label: str):
-    if ds.crs is None:
-        raise ValueError(f"{label} CRS is missing.")
-    if getattr(ds.crs, "is_geographic", False):
+# ---------------------------------------------------------------------------
+# Raster helpers
+# ---------------------------------------------------------------------------
+
+def _require_projected(ds: rasterio.io.DatasetReader, label: str) -> None:
+    if ds.crs is None or getattr(ds.crs, "is_geographic", False):
         raise ValueError(
-            f"{label} CRS is geographic ({ds.crs}). "
-            f"Reproject TOA rasters to a projected CRS (meters) or areas/curves will be wrong."
+            f"{label}: CRS is {ds.crs}. Rasters must be in a projected (meter) CRS."
         )
 
 
-def pixel_area_m2(ds: rasterio.io.DatasetReader) -> float:
+def _pixel_area_m2(ds: rasterio.io.DatasetReader) -> float:
     t = ds.transform
-    return float(abs(t.a * t.e - t.b * t.d))  # determinant
+    return float(abs(t.a * t.e - t.b * t.d))
 
 
-def burn_mask(ds: rasterio.io.DatasetReader, band: int, threshold: float) -> np.ndarray:
-    arr = ds.read(band, masked=True)
+def _burn_mask(ds: rasterio.io.DatasetReader, band: int, threshold: float) -> np.ndarray:
+    arr  = ds.read(band, masked=True)
     data = np.asarray(arr.filled(np.nan), dtype=np.float32)
-    nod = ds.nodata
-    if nod is not None:
-        data = np.where(np.isclose(data, nod), np.nan, data)
+    if ds.nodata is not None:
+        data = np.where(np.isclose(data, ds.nodata), np.nan, data)
     return np.isfinite(data) & (data >= threshold)
 
 
-def obs_mask(ds: rasterio.io.DatasetReader, geom) -> np.ndarray:
+def _obs_mask(ds: rasterio.io.DatasetReader, geom) -> np.ndarray:
     m = rasterize(
         [(geom, 1)],
         out_shape=(ds.height, ds.width),
@@ -195,49 +253,43 @@ def obs_mask(ds: rasterio.io.DatasetReader, geom) -> np.ndarray:
     return m.astype(bool)
 
 
-def safe_div(n: float, d: float) -> float:
+def _safe_div(n: float, d: float) -> float:
     return 0.0 if d == 0 else n / d
 
 
-def raster_metrics(obs: np.ndarray, sim: np.ndarray, px_m2: float, prefix: str) -> dict[str, Any]:
-    obs = obs.astype(bool)
-    sim = sim.astype(bool)
-    tp = int(np.logical_and(obs, sim).sum())
+def _raster_metrics(obs: np.ndarray, sim: np.ndarray, px_m2: float, prefix: str) -> dict[str, Any]:
+    obs, sim = obs.astype(bool), sim.astype(bool)
+    tp = int(np.logical_and(obs,  sim).sum())
     fp = int(np.logical_and(~obs, sim).sum())
     fn = int(np.logical_and(obs, ~sim).sum())
     tn = int(np.logical_and(~obs, ~sim).sum())
-    obs_px = int(obs.sum())
-    sim_px = int(sim.sum())
-    union_px = tp + fp + fn
-
-    obs_m2 = obs_px * px_m2
-    sim_m2 = sim_px * px_m2
-
-    j = safe_div(tp, union_px)
-    s = safe_div(2 * tp, (obs_px + sim_px))
-
-    total = tp + fp + fn + tn
+    obs_m2  = obs.sum() * px_m2
+    sim_m2  = sim.sum() * px_m2
+    union   = tp + fp + fn
+    jaccard = _safe_div(tp, union)
+    sorensen = _safe_div(2 * tp, obs.sum() + sim.sum())
+    total   = tp + fp + fn + tn
     if total:
         pa = (tp + tn) / total
-        pe = ((tp + fp) * (tp + fn) + (fn + tn) * (fp + tn)) / (total**2)
-        k = 0.0 if (1 - pe) == 0 else (pa - pe) / (1 - pe)
+        pe = ((tp + fp) * (tp + fn) + (fn + tn) * (fp + tn)) / total ** 2
+        kappa = 0.0 if (1 - pe) == 0 else (pa - pe) / (1 - pe)
     else:
-        k = 0.0
-
+        kappa = 0.0
     return {
-        f"{prefix}_observed_m2": float(obs_m2),
-        f"{prefix}_simulated_m2": float(sim_m2),
-        f"{prefix}_observed_acres": float(obs_m2 * M2_TO_ACRES),
-        f"{prefix}_simulated_acres": float(sim_m2 * M2_TO_ACRES),
-        f"{prefix}_jaccard": float(j),
-        f"{prefix}_sorensen": float(s),
-        f"{prefix}_kappa": float(k),
-        f"{prefix}_ratio_of_areas": float(safe_div(sim_m2, obs_m2)),
-        f"{prefix}_burn_px": int(sim_px),
+        f"{prefix}_observed_m2":    float(obs_m2),
+        f"{prefix}_simulated_m2":   float(sim_m2),
+        f"{prefix}_observed_acres": float(obs_m2  * M2_TO_ACRES),
+        f"{prefix}_simulated_acres":float(sim_m2  * M2_TO_ACRES),
+        f"{prefix}_jaccard":        float(jaccard),
+        f"{prefix}_sorensen":       float(sorensen),
+        f"{prefix}_kappa":          float(kappa),
+        f"{prefix}_ratio_of_areas": float(_safe_div(sim_m2, obs_m2)),
+        f"{prefix}_burn_px":        int(sim.sum()),
     }
 
 
-def model_curve(toa: np.ndarray, threshold: float, px_m2: float, bins: int) -> tuple[np.ndarray, np.ndarray]:
+def _model_curve(toa: np.ndarray, threshold: float, px_m2: float, bins: int
+                 ) -> tuple[np.ndarray, np.ndarray]:
     v = toa[np.isfinite(toa) & (toa >= threshold)]
     if v.size == 0:
         return np.array([]), np.array([])
@@ -249,96 +301,124 @@ def model_curve(toa: np.ndarray, threshold: float, px_m2: float, bins: int) -> t
     return edges[1:], np.cumsum(counts).astype(np.float64) * px_m2
 
 
-def reproject_mask_to(ds_src, ds_dst, mask_u8: np.ndarray) -> np.ndarray:
+def _reproject_mask(ds_src, ds_dst, mask_u8: np.ndarray) -> np.ndarray:
     dst = np.zeros((ds_dst.height, ds_dst.width), dtype=np.uint8)
     reproject(
-        source=mask_u8,
-        destination=dst,
-        src_transform=ds_src.transform,
-        src_crs=ds_src.crs,
-        dst_transform=ds_dst.transform,
-        dst_crs=ds_dst.crs,
-        resampling=Resampling.nearest,
-        src_nodata=0,
-        dst_nodata=0,
+        source=mask_u8, destination=dst,
+        src_transform=ds_src.transform, src_crs=ds_src.crs,
+        dst_transform=ds_dst.transform, dst_crs=ds_dst.crs,
+        resampling=Resampling.nearest, src_nodata=0, dst_nodata=0,
     )
     return dst
 
 
-# -------------------------
-# Satellite (per-case)
-# -------------------------
-def sat_datetime(df: pd.DataFrame, date_col: str, time_col: str) -> pd.Series:
-    t = df[time_col].astype(str).str.replace(r"\D+", "", regex=True).str.zfill(4).str[:4]
-    return pd.to_datetime(df[date_col].astype(str).str.strip() + " " + t, errors="coerce")
+def _decimate(x: np.ndarray, y: np.ndarray, max_pts: int):
+    if max_pts <= 0 or len(x) <= max_pts:
+        return x, y
+    idx = np.unique(np.linspace(0, len(x) - 1, max_pts).round().astype(int))
+    return x[idx], y[idx]
 
 
-def read_case_sat(case_dir: Path) -> gpd.GeoDataFrame | None:
+def _norm(y: np.ndarray) -> np.ndarray:
+    y   = np.asarray(y, dtype=np.float64)
+    den = float(np.nanmax(y)) if y.size else 0.0
+    return (y / den) if (np.isfinite(den) and den > 0) else y
+
+
+# ---------------------------------------------------------------------------
+# Satellite helpers
+# ---------------------------------------------------------------------------
+
+def _sat_datetime(df: pd.DataFrame) -> pd.Series:
+    t = df[SAT_TIME_COL].astype(str).str.replace(r"\D+", "", regex=True).str.zfill(4).str[:4]
+    return pd.to_datetime(df[SAT_DATE_COL].astype(str).str.strip() + " " + t, errors="coerce")
+
+
+def _read_case_sat(case_dir: Path) -> gpd.GeoDataFrame | None:
     p = case_dir / SAT_GPKG_NAME
     if not p.exists():
         return None
     gdf = gpd.read_file(p, layer=SAT_LAYER) if SAT_LAYER else gpd.read_file(p)
     if gdf.empty:
         return None
-
-    # CRS auto:
     if gdf.crs is None:
-        # very conservative auto-infer: if bounds look like lon/lat, assume EPSG:4326; else require user fix
-        b = gdf.total_bounds  # minx, miny, maxx, maxy
-        if (-180 <= b[0] <= 180) and (-180 <= b[2] <= 180) and (-90 <= b[1] <= 90) and (-90 <= b[3] <= 90):
+        b = gdf.total_bounds
+        if (-180 <= b[0] <= 180) and (-90 <= b[1] <= 90):
             gdf = gdf.set_crs("EPSG:4326")
         else:
-            raise ValueError(f"Satellite CRS missing and cannot infer (bounds={b}). Fix CRS in {p.name}.")
-
-    gdf["sat_dt"] = sat_datetime(gdf, SAT_DATE_COL, SAT_TIME_COL)
+            raise ValueError(f"Satellite CRS missing (bounds={b}) in {p.name}")
+    gdf["sat_dt"] = _sat_datetime(gdf)
     gdf = gdf.dropna(subset=["sat_dt"])
     return None if gdf.empty else gdf
 
 
-def sat_chain(
-    pts_area: gpd.GeoDataFrame,
-    burn_area_geom,
-    discovery_dt: pd.Timestamp,
-    buffer_m: float,
-    max_gap: pd.Timedelta,
-    frac: float,
-) -> tuple[pd.Timestamp | pd.NaT, list[pd.Timestamp], list[float], float | None]:
+def _sat_chain(pts_area, burn_geom, discovery_dt, buffer_m, max_gap, frac
+               ) -> tuple[pd.Timestamp | pd.NaT, list, list, float | None]:
     pts = pts_area.loc[pts_area["sat_dt"] >= discovery_dt].sort_values("sat_dt")
     if pts.empty:
         return pd.NaT, [], [], None
-
-    times: list[pd.Timestamp] = []
-    areas: list[float] = []
-
-    cum = None
-    last = None
+    times, areas, cum, last = [], [], None, None
     for _, r in pts.iterrows():
         t = r["sat_dt"]
         if last is not None and (t - last) > max_gap:
             break
         g = r.geometry.buffer(buffer_m)
         cum = g if cum is None else cum.union(g)
-        areas.append(float(cum.intersection(burn_area_geom).area))
+        areas.append(float(cum.intersection(burn_geom).area))
         times.append(t)
         last = t
-
-    burn_area = float(burn_area_geom.area)
-    eff = min(burn_area, float(areas[-1]))
+    eff    = min(float(burn_geom.area), float(areas[-1]))
     target = float(frac * eff)
-
-    end = pd.NaT
-    for t, a in zip(times, areas):
-        if a >= target:
-            end = t
-            break
-    if pd.isna(end):
-        end = times[-1]
+    end    = next((t for t, a in zip(times, areas) if a >= target), times[-1])
     return end, times, areas, target
 
 
-# -------------------------
-# Report text + plotting
-# -------------------------
+# ---------------------------------------------------------------------------
+# Map helpers
+# ---------------------------------------------------------------------------
+
+def _plot_mask(ax, ds, mask: np.ndarray, rgba) -> None:
+    if mask is None or not mask.any():
+        return
+    r, g, b, a = rgba
+    img = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.float32)
+    m   = mask.astype(np.float32)
+    img[..., 0] = m * r
+    img[..., 1] = m * g
+    img[..., 2] = m * b
+    img[..., 3] = m * a
+    ax.imshow(img, extent=plotting_extent(ds), origin="upper", interpolation="nearest")
+
+
+def _plot_barrier(ax, barrier_path: Path, base_ds, alpha: float = 0.15, gray: float = 0.2) -> None:
+    if not barrier_path.exists():
+        return
+    try:
+        with rasterio.open(barrier_path) as src:
+            raw = src.read(1)
+            dst = np.zeros((base_ds.height, base_ds.width), dtype=raw.dtype)
+            reproject(
+                source=raw, destination=dst,
+                src_transform=src.transform, src_crs=src.crs,
+                dst_transform=base_ds.transform, dst_crs=base_ds.crs,
+                resampling=Resampling.nearest,
+            )
+        mask = (dst != 0).astype(np.float32)
+        if not mask.any():
+            return
+        img = np.zeros((*mask.shape, 4), dtype=np.float32)
+        img[..., :3] = mask[..., None] * gray
+        img[..., 3]  = mask * alpha
+        ax.imshow(img, extent=plotting_extent(base_ds), origin="upper",
+                  interpolation="nearest", zorder=0)
+    except Exception as e:
+        log.warning("Barrier overlay failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Text block
+# ---------------------------------------------------------------------------
+
 def _fmt(v: Any, kind: str = "") -> str:
     if v is None:
         return ""
@@ -348,360 +428,403 @@ def _fmt(v: Any, kind: str = "") -> str:
     except Exception:
         pass
     try:
-        if kind == "m2":
-            return f"{float(v):,.0f}"
-        if kind == "ac":
-            return f"{float(v):,.2f}"
-        if kind == "f4":
-            return f"{float(v):.4f}"
-        if kind == "r3":
-            return f"{float(v):.3f}"
+        if kind == "m2": return f"{float(v):,.0f}"
+        if kind == "ac": return f"{float(v):,.2f}"
+        if kind == "f4": return f"{float(v):.4f}"
+        if kind == "r3": return f"{float(v):.3f}"
         return str(v)
     except Exception:
         return str(v)
 
 
-def text_block(c: Case, case_dir: Path) -> str:
-    m = c.metrics
-    lines = [
-        f"CASE: {c.case_id}",
-        "",
-        "FILES",
-        f"ELMFIRE TOA: {rel_or_name(c.elm_toa, case_dir)}",
-        f"FARSITE TOA: {rel_or_name(c.far_toa, case_dir)}",
-        f"Threshold : {BURN_THRESHOLD}",
-        f"Duration (TSTOP): {c.tstop_h:.2f} h" if c.tstop_h is not None else "Duration (TSTOP): (not found)",
-    ]
-    if c.tstop_src:
-        lines.append(f"TSTOP source: {Path(c.tstop_src).name}")
-    if c.obs_true_m2 is not None:
-        lines.append(f"Observed area (vec, {AREA_CRS}): {_fmt(c.obs_true_m2,'m2')} m² ({_fmt(c.obs_true_m2*M2_TO_ACRES,'ac')} ac)")
-    if c.discovery_dt is not None and not pd.isna(c.discovery_dt):
-        lines.append(f"Discovery_dt (sat earliest in-burn): {c.discovery_dt}")
+def _text_block(c: Case, case_dir: Path) -> str:
+    m       = c.metrics
+    active  = [mc for mc in MODELS if c.model_toas.get(mc.label)]
+    cw      = max(10, max((len(mc.label) for mc in active), default=10))  # column width
+    pad     = 14  # label column width
 
-    lines += ["", "METRICS (raster-space, per-model grid)"]
-    head = f"{'Metric':<14} | {'ELMFIRE':>10} | {'FARSITE':>10}"
-    lines += [head, "-" * len(head)]
+    lines = []
+
+    # — files —
+    lines += ["FILES"]
+    for mc in MODELS:
+        toa = c.model_toas.get(mc.label)
+        val = _rel_or_name(toa, case_dir) if toa else "(not found)"
+        lines.append(f"  {mc.label + ' TOA':<{pad}}: {val}")
+    lines.append(f"  {'Threshold':<{pad}}: {BURN_THRESHOLD}")
+    if c.tstop_h is not None:
+        lines.append(f"  {'TSTOP':<{pad}}: {c.tstop_h:.2f} h")
+    else:
+        lines.append(f"  {'TSTOP':<{pad}}: (not found)")
+    if c.obs_true_m2 is not None:
+        lines.append(
+            f"  {'Obs area':<{pad}}: "
+            f"{_fmt(c.obs_true_m2, 'm2')} m²  "
+            f"({_fmt(c.obs_true_m2 * M2_TO_ACRES, 'ac')} ac)"
+        )
+
+    # — metrics table —
+    header = f"\n{'METRICS':14}" + "".join(f"  {mc.label:>{cw}}" for mc in active)
+    sep    = "─" * (14 + len(active) * (cw + 2))
+    lines += [header, sep]
     rows = [
-        ("Sim m²", "m2", "simulated_m2"),
-        ("Obs m²", "m2", "observed_m2"),
-        ("Jaccard", "f4", "jaccard"),
-        ("Sorensen", "f4", "sorensen"),
-        ("Kappa", "f4", "kappa"),
-        ("Area ratio", "f3", "ratio_of_areas"),
-        ("Burn px", "", "burn_px"),
+        ("Sim m²",     "m2", "simulated_m2"),
+        ("Obs m²",     "m2", "observed_m2"),
+        ("Jaccard",    "f4", "jaccard"),
+        ("Sorensen",   "f4", "sorensen"),
+        ("Kappa",      "f4", "kappa"),
+        ("Area ratio", "r3", "ratio_of_areas"),
+        ("Burn px",    "",   "burn_px"),
     ]
     for lbl, kind, key in rows:
-        e = _fmt(m.get(f"elm_{key}", np.nan), kind)
-        f = _fmt(m.get(f"far_{key}", np.nan), kind) if c.far_toa else ""
-        lines.append(f"{lbl:<14} | {e:>10} | {f:>10}")
+        cols = "".join(
+            f"  {_fmt(m.get(f'{mc.label.lower()}_{key}'), kind):>{cw}}"
+            for mc in active
+        )
+        lines.append(f"{lbl:<14}{cols}")
 
+    # — satellite —
     if SAT_ENABLED:
-        lines += ["", "SATELLITE (per-case)"]
-        lines.append(f"sat file: {SAT_GPKG_NAME}")
-        lines.append(f"sat layer: {SAT_LAYER}")
-        lines.append(f"sat points in chain: {len(c.sat_times)}")
-        if c.sat_times:
-            lines.append(f"sat final area m²: {_fmt(c.sat_areas_m2[-1],'m2')}")
-            lines.append(f"sat end time: {c.sat_end}")
+        lines += ["\nSATELLITE"]
+        if c.discovery_dt is not None and not pd.isna(c.discovery_dt):
+            lines.append(f"  Discovery   : {c.discovery_dt:%Y-%m-%d %H:%M}")
+        lines.append(f"  Points      : {len(c.sat_times)}")
+        if c.sat_areas_m2:
+            lines.append(f"  Final area  : {_fmt(c.sat_areas_m2[-1], 'm2')} m²")
+        if c.sat_end is not None and not pd.isna(c.sat_end):
+            lines.append(f"  End time    : {c.sat_end}")
+
     return "\n".join(lines)
 
 
-def plot_mask(ax, ds, mask: np.ndarray, rgba):
-    if mask is None or not mask.any():
-        return
-    ext = plotting_extent(ds)
-    r, g, b, a = rgba
-    img = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.float32)
-    m = mask.astype(np.float32)
-    img[..., 0] = m * r
-    img[..., 1] = m * g
-    img[..., 2] = m * b
-    img[..., 3] = m * a
-    ax.imshow(img, extent=ext, origin="upper", interpolation="nearest")
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
 
-
-def decimate_xy(x: np.ndarray, y: np.ndarray, max_points: int):
-    if max_points <= 0 or len(x) <= max_points:
-        return x, y
-    idx = np.unique(np.linspace(0, len(x) - 1, max_points).round().astype(int))
-    return x[idx], y[idx]
-
-
-def case_page(c: Case, case_dir: Path) -> plt.Figure:
-    """
-    Page layout:
-      - Left: map (Observed outline + ELMFIRE mask + FARSITE mask)
-      - Right-top: text block
-      - Right-bottom: evolution plot with TWO X axes:
-          * bottom = simulation time (hours, from TOA)
-          * top    = satellite datetime
-      - Y axis: per-curve normalized (each curve goes 0..1)
-    """
+def _case_page(c: Case, case_dir: Path) -> plt.Figure:
+    fire_label = c.fire_name or ""
+    year_label = str(c.fire_year) if c.fire_year else ""
+    if fire_label and year_label:
+        suptitle = f"{fire_label}  ({year_label})  —  Case {c.case_id}"
+    elif fire_label:
+        suptitle = f"{fire_label}  —  Case {c.case_id}"
+    else:
+        suptitle = f"Case {c.case_id}"
 
     fig = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.45, 1.0], height_ratios=[1.0, 0.75])
+    fig.suptitle(suptitle, fontsize=12, fontweight="bold", y=0.99)
 
-    ax_map = fig.add_subplot(gs[:, 0])
-    ax_txt = fig.add_subplot(gs[0, 1])
-    ax_ts = fig.add_subplot(gs[1, 1])
+    gs      = fig.add_gridspec(2, 2, width_ratios=[1.45, 1.0], height_ratios=[1.0, 0.75])
+    ax_map  = fig.add_subplot(gs[:, 0])
+    ax_txt  = fig.add_subplot(gs[0, 1])
+    ax_ts   = fig.add_subplot(gs[1, 1])
     ax_txt.axis("off")
 
-    elm_rgba = (1.0, 0.0, 0.0, 0.35)
-    far_rgba = (0.0, 0.4, 1.0, 0.35)
-    
-    elm_color = elm_rgba[:3]
-    far_color = far_rgba[:3]
-    sat_color = "black"  # or choose something else
-
-    # -----------------
+    # ------------------------------------------------------------------
     # MAP
-    # -----------------
+    # ------------------------------------------------------------------
     ax_map.grid(True, alpha=0.2, linewidth=0.6)
     ax_map.set_aspect("equal", "box")
 
-    with rasterio.open(c.elm_toa) as base:
-        require_projected(base, "ELMFIRE TOA")
-        # ---- Barrier background
-        barrier_path = case_dir / "inputs" / "barrier.tif"
-        plot_barrier_background(ax_map, barrier_path, base, alpha=0.15)
-        elm_burn = burn_mask(base, ELM_BAND, BURN_THRESHOLD)
-        plot_mask(ax_map, base, elm_burn, elm_rgba)
+    # Use first available model as spatial reference
+    base_mc  = next((mc for mc in MODELS if c.model_toas.get(mc.label)), None)
+    base_toa = c.model_toas[base_mc.label] if base_mc else None
 
-        if c.far_toa:
+    if base_toa:
+        with rasterio.open(base_toa) as base_ds:
+            _require_projected(base_ds, f"{base_mc.label} TOA")
+            _plot_barrier(ax_map, case_dir / "inputs" / "barrier.tif", base_ds)
+
+            for mc in MODELS:
+                toa = c.model_toas.get(mc.label)
+                if not toa:
+                    continue
+                try:
+                    if toa == base_toa:
+                        mask = _burn_mask(base_ds, mc.band, BURN_THRESHOLD)
+                        _plot_mask(ax_map, base_ds, mask, mc.rgba)
+                    else:
+                        with rasterio.open(toa) as ds2:
+                            _require_projected(ds2, f"{mc.label} TOA")
+                            raw_u8 = _burn_mask(ds2, mc.band, BURN_THRESHOLD).astype(np.uint8)
+                            on_base = _reproject_mask(ds2, base_ds, raw_u8).astype(bool)
+                            _plot_mask(ax_map, base_ds, on_base, mc.rgba)
+                except Exception as e:
+                    log.warning("Case %s: %s map overlay failed: %s", c.case_id, mc.label, e)
+
+            gpd.GeoSeries([c.obs_geom_base], crs=base_ds.crs).plot(
+                ax=ax_map, facecolor="none", edgecolor="black", linewidth=2
+            )
+            if c.ign_base is not None and not c.ign_base.empty:
+                c.ign_base.plot(ax=ax_map, marker="x", markersize=60, zorder=5)
+
             try:
-                with rasterio.open(c.far_toa) as far_ds:
-                    require_projected(far_ds, "FARSITE TOA")
-                    far_burn_u8 = burn_mask(far_ds, FAR_BAND, BURN_THRESHOLD).astype(np.uint8)
-                    far_on_base = reproject_mask_to(far_ds, base, far_burn_u8).astype(bool)
-                    plot_mask(ax_map, base, far_on_base, far_rgba)
-            except Exception as e:
-                log.warning("Case %s: FARSITE plot failed: %s", c.case_id, e)
+                minx, miny, maxx, maxy = c.obs_geom_base.bounds
+                pad = 0.1 * max(maxx - minx, maxy - miny)
+                ax_map.set_xlim(minx - pad, maxx + pad)
+                ax_map.set_ylim(miny - pad, maxy + pad)
+            except Exception:
+                pass
 
-        # Observed outline + ignition
-        gpd.GeoSeries([c.obs_geom_base], crs=base.crs).plot(
-            ax=ax_map, facecolor="none", edgecolor="black", linewidth=2
-        )
-        if c.ign_base is not None and not c.ign_base.empty:
-            c.ign_base.plot(ax=ax_map, marker="x", markersize=60, zorder=5)
+    # Map title: Jaccard scores per model
+    j_parts = []
+    for mc in MODELS:
+        j = c.metrics.get(f"{mc.label.lower()}_jaccard", np.nan)
+        if np.isfinite(j):
+            j_parts.append(f"J({mc.label})={j:.3f}")
+    ax_map.set_title("Burn masks" + ("  |  " + "  ".join(j_parts) if j_parts else ""))
 
-        # zoom to observed
-        try:
-            minx, miny, maxx, maxy = c.obs_geom_base.bounds
-            pad = 0.1 * max(maxx - minx, maxy - miny)
-            ax_map.set_xlim(minx - pad, maxx + pad)
-            ax_map.set_ylim(miny - pad, maxy + pad)
-        except Exception:
-            pass
-
-    ej = c.metrics.get("elm_jaccard", np.nan)
-    fj = c.metrics.get("far_jaccard", np.nan)
-    title = f"Case {c.case_id} — Burn masks"
-    if np.isfinite(ej):
-        title += f" | J(elm)={ej:.3f}"
-    if c.far_toa and np.isfinite(fj):
-        title += f" J(far)={fj:.3f}"
-    ax_map.set_title(title)
-
-    handles = [
-        Line2D([0], [0], color="black", linewidth=2, label="Observed"),
-        Patch(facecolor=elm_rgba[:3], alpha=elm_rgba[3], label="ELMFIRE burn"),
-    ]
-    if c.far_toa:
-        handles.append(Patch(facecolor=far_rgba[:3], alpha=far_rgba[3], label="FARSITE burn"))
+    # Legend
+    handles = [Line2D([0], [0], color="black", linewidth=2, label="Observed")]
+    for mc in MODELS:
+        if c.model_toas.get(mc.label):
+            handles.append(Patch(facecolor=mc.color, alpha=mc.alpha, label=f"{mc.label} burn"))
     if c.ign_base is not None and not c.ign_base.empty:
         handles.append(Line2D([0], [0], marker="x", linestyle="None", markersize=10, label="Ignition"))
-    ax_map.legend(handles=handles, loc="upper right")
+    ax_map.legend(handles=handles, loc="upper right", fontsize=8)
 
-    # -----------------
+    # ------------------------------------------------------------------
     # TEXT
-    # -----------------
+    # ------------------------------------------------------------------
     ax_txt.text(
-        0.0, 1.0, text_block(c, case_dir),
-        va="top", ha="left", fontsize=8.5, family="monospace"
+        0.0, 1.0, _text_block(c, case_dir),
+        va="top", ha="left", fontsize=8, family="monospace", transform=ax_txt.transAxes,
     )
 
-    # -----------------
-    # EVOLUTION: two X axes + per-curve normalization
-    #   bottom axis: simulation time (hours from TOA)
-    #   top axis: satellite datetime
-    # -----------------
+    # ------------------------------------------------------------------
+    # AREA EVOLUTION
+    # ------------------------------------------------------------------
     ax_sim = ax_ts
     ax_sat = ax_ts.twiny()
 
     ax_sim.grid(True, alpha=0.3, linewidth=0.6)
     ax_sim.set_title("Area evolution (each curve normalized to its own max)")
-    ax_sim.set_ylabel("Area / max (per curve)")
+    ax_sim.set_ylabel("Area / max")
     ax_sim.set_ylim(0.0, 1.05)
     ax_sim.set_xlabel("Simulation time (hours)")
 
-    def _norm(y: np.ndarray) -> np.ndarray:
-        y = np.asarray(y, dtype=np.float64)
-        if y.size == 0:
-            return y
-        den = float(np.nanmax(y))
-        return (y / den) if (np.isfinite(den) and den > 0) else y
-
-    UNIT_TO_HOURS = {"s": 1/3600.0, "sec": 1/3600.0, "min": 1/60.0, "m": 1/60.0, "h": 1.0, "hr": 1.0}
-    scale_h = UNIT_TO_HOURS.get(str(TOA_TIME_UNIT).lower(), 1/3600.0)
-
-    # ---- ELM curve (simulation hours)
-    t_elm = np.array([], dtype=np.float64)
-    a_elm = np.array([], dtype=np.float64)
-    with rasterio.open(c.elm_toa) as ds:
-        toa = np.asarray(ds.read(ELM_BAND, masked=True).filled(np.nan), dtype=np.float64)
-        t_elm, a_elm = model_curve(toa, BURN_THRESHOLD, pixel_area_m2(ds), MODEL_CURVE_BINS)
-    if t_elm.size and a_elm.size:
-        xh = t_elm * scale_h
-        xh, y = decimate_xy(xh, _norm(a_elm), CURVE_MAX_POINTS)
-        ax_sim.plot(xh, y, color=elm_color, linewidth=1.5, label="ELMFIRE (sim)")
-
-    # ---- FARSITE curve (simulation hours)
-    t_far = np.array([], dtype=np.float64)
-    a_far = np.array([], dtype=np.float64)
-    if c.far_toa:
-        try:
-            with rasterio.open(c.far_toa) as ds2:
-                toa2 = np.asarray(ds2.read(FAR_BAND, masked=True).filled(np.nan), dtype=np.float64)
-                toa2 = toa2 * 60
-                t_far, a_far = model_curve(toa2, BURN_THRESHOLD, pixel_area_m2(ds2), MODEL_CURVE_BINS)
-            if t_far.size and a_far.size:
-                xh = t_far * scale_h
-                xh, y = decimate_xy(xh, _norm(a_far), CURVE_MAX_POINTS)
-                ax_sim.plot(xh, y, color=far_color, linewidth=1.5, label="FARSITE (sim)")
-        except Exception as e:
-            log.warning("Case %s: FARSITE curve failed: %s", c.case_id, e)
-
-    # ---- Set sim x-limits: prefer tstop, else max of plotted sim curves
     xmax = 0.0
-    try:
-        if c.tstop_h is not None and np.isfinite(c.tstop_h) and c.tstop_h > 0:
-            xmax = float(c.tstop_h)
-        else:
-            if t_elm.size:
-                xmax = max(xmax, float(np.nanmax(t_elm * scale_h)))
-            if t_far.size:
-                xmax = max(xmax, float(np.nanmax(t_far * scale_h)))
-        if xmax > 0:
-            ax_sim.set_xlim(0.0, xmax)
-    except Exception:
-        pass
+    for mc in MODELS:
+        toa_path = c.model_toas.get(mc.label)
+        if not toa_path:
+            continue
+        try:
+            with rasterio.open(toa_path) as ds:
+                toa_arr = np.asarray(ds.read(mc.band, masked=True).filled(np.nan), np.float64)
+                t_vals, a_vals = _model_curve(toa_arr, BURN_THRESHOLD, _pixel_area_m2(ds), MODEL_CURVE_BINS)
+            if t_vals.size and a_vals.size:
+                xh = t_vals * mc.scale_to_hours
+                xh, yn = _decimate(xh, _norm(a_vals), CURVE_MAX_POINTS)
+                ax_sim.plot(xh, yn, color=mc.color, linewidth=1.5, label=f"{mc.label} (sim)")
+                xmax = max(xmax, float(xh[-1]))
+        except Exception as e:
+            log.warning("Case %s: %s curve failed: %s", c.case_id, mc.label, e)
 
-    # ---- Satellite curve (top axis, datetime)
+    if c.tstop_h is not None and np.isfinite(c.tstop_h) and c.tstop_h > 0:
+        xmax = float(c.tstop_h)
+    if xmax > 0:
+        ax_sim.set_xlim(0.0, xmax)
+
+    # Satellite curve
     if c.sat_times and c.sat_areas_m2:
         t_sat = np.array(c.sat_times, dtype="datetime64[ns]")
-        y_sat = _norm(np.array(c.sat_areas_m2, dtype=np.float64))
-        t_sat, y_sat = decimate_xy(t_sat, y_sat, CURVE_MAX_POINTS)
-
-        ax_sat.plot(t_sat, y_sat, color="black", linewidth=1.2, label="Satellite (datetime)")
-
+        y_sat, t_sat = _norm(np.array(c.sat_areas_m2)), t_sat
+        t_sat, y_sat = _decimate(t_sat, _norm(np.array(c.sat_areas_m2)), CURVE_MAX_POINTS)
+        ax_sat.plot(t_sat, y_sat, color="black", linewidth=1.2, label="Satellite")
         ax_sat.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=6))
         ax_sat.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax_sat.xaxis.get_major_locator()))
         ax_sat.set_xlabel("Satellite time")
-
-        # optional markers
         if c.sat_end is not None and not pd.isna(c.sat_end):
             ax_sat.axvline(c.sat_end, color="black", linestyle="--", linewidth=1.0)
-        if c.sat_target_m2 is not None and np.isfinite(c.sat_target_m2):
-            den = float(np.nanmax(c.sat_areas_m2)) if c.sat_areas_m2 else 1.0
+        if c.sat_target_m2 is not None and np.isfinite(c.sat_target_m2) and c.sat_areas_m2:
+            den = float(np.nanmax(c.sat_areas_m2))
             if den > 0:
-                ax_sim.axhline(float(c.sat_target_m2) / den, color="black", linestyle="--", linewidth=1.0)
+                ax_sim.axhline(c.sat_target_m2 / den, color="black", linestyle="--", linewidth=1.0)
 
-    # ---- Legend: merge both axes
     h1, l1 = ax_sim.get_legend_handles_labels()
     h2, l2 = ax_sat.get_legend_handles_labels()
     if h1 or h2:
         ax_sim.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower right")
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     return fig
 
 
-def error_page(case_id: str, msg: str) -> plt.Figure:
+def _error_page(case_id: str, msg: str) -> plt.Figure:
     fig = plt.figure(figsize=(11.69, 8.27))
-    ax = fig.add_subplot(111)
+    ax  = fig.add_subplot(111)
     ax.axis("off")
-    ax.text(0.02, 0.98, f"CASE: {case_id}\n\nERROR:\n{msg}", va="top", ha="left", family="monospace", fontsize=12)
+    ax.text(0.02, 0.98, f"CASE: {case_id}\n\nERROR:\n{msg}",
+            va="top", ha="left", family="monospace", fontsize=12)
     fig.tight_layout()
     return fig
 
-def plot_barrier_background(ax, barrier_path: Path, base_ds, alpha=0.10, gray=0.2):
-    """
-    Soft, uniform barrier background:
-      - any nonzero barrier value is drawn identically
-      - reprojected to base grid
-      - uses explicit RGBA (avoids imshow normalization artifacts)
-    """
-    if not barrier_path.exists():
-        return
 
-    try:
-        with rasterio.open(barrier_path) as src:
-            src_data = src.read(1)
+# ---------------------------------------------------------------------------
+# Summary pages (scatter + histogram)
+# ---------------------------------------------------------------------------
 
-            dst = np.zeros((base_ds.height, base_ds.width), dtype=src_data.dtype)
-            reproject(
-                source=src_data,
-                destination=dst,
-                src_transform=src.transform,
-                src_crs=src.crs,
-                dst_transform=base_ds.transform,
-                dst_crs=base_ds.crs,
-                resampling=Resampling.nearest,
+_METRICS_INFO = [
+    ("jaccard",  "Jaccard Index"),
+    ("sorensen", "Sørensen Coeff."),
+    ("kappa",    "Cohen's κ"),
+]
+
+
+def _collect_model_arrays(cases: list[Case]) -> dict[str, dict[str, np.ndarray]]:
+    """Build per-model numpy arrays of x-variables and similarity metrics."""
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for mc in MODELS:
+        prefix = mc.label.lower()
+        rows = [
+            (
+                c.obs_true_m2 * M2_TO_ACRES if c.obs_true_m2 else np.nan,
+                c.tstop_h if c.tstop_h is not None else np.nan,
+                float(c.metrics.get(f"{prefix}_jaccard",  np.nan)),
+                float(c.metrics.get(f"{prefix}_sorensen", np.nan)),
+                float(c.metrics.get(f"{prefix}_kappa",    np.nan)),
             )
-
-        mask = (dst != 0)
-
-        if not mask.any():
-            return
-
-        extent = plotting_extent(base_ds)
-
-        # RGBA image: constant gray wherever mask is True
-        img = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.float32)
-        m = mask.astype(np.float32)
-        img[..., 0] = m * gray
-        img[..., 1] = m * gray
-        img[..., 2] = m * gray
-        img[..., 3] = m * alpha
-
-        ax.imshow(img, extent=extent, origin="upper", interpolation="nearest", zorder=0)
-
-    except Exception as e:
-        log.warning("Barrier background failed: %s", e)
+            for c in cases if c.model_toas.get(mc.label)
+        ]
+        if rows:
+            arr = np.array(rows, dtype=float)
+        else:
+            arr = np.empty((0, 5))
+        out[mc.label] = {
+            "obs_acres": arr[:, 0] if arr.size else np.array([]),
+            "tstop_h":   arr[:, 1] if arr.size else np.array([]),
+            "jaccard":   arr[:, 2] if arr.size else np.array([]),
+            "sorensen":  arr[:, 3] if arr.size else np.array([]),
+            "kappa":     arr[:, 4] if arr.size else np.array([]),
+        }
+    return out
 
 
-# -------------------------
+def _summary_scatter(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figure:
+    """3×2 grid: rows = metrics, cols = [burn size, duration]."""
+    x_configs = [
+        ("obs_acres", "Observed Burn Area (acres)", True),   # log x
+        ("tstop_h",   "Fire Duration (hours)",      False),
+    ]
+
+    fig, axes = plt.subplots(3, 2, figsize=(11.69, 8.27), squeeze=False)
+    fig.suptitle("Similarity Scores vs. Fire Characteristics",
+                 fontsize=13, fontweight="bold", y=0.99)
+
+    for col, (x_key, x_label, use_log) in enumerate(x_configs):
+        for row, (m_key, m_label) in enumerate(_METRICS_INFO):
+            ax = axes[row, col]
+            ax.set_ylim(-0.05, 1.05)
+            ax.grid(True, alpha=0.3, linewidth=0.5)
+            if col == 0:
+                ax.set_ylabel(m_label)
+            if row == len(_METRICS_INFO) - 1:
+                ax.set_xlabel(x_label)
+            if row == 0:
+                ax.set_title(x_label.split(" (")[0])
+            if use_log:
+                ax.set_xscale("log")
+
+            for mc in MODELS:
+                x = model_arrays[mc.label][x_key]
+                y = model_arrays[mc.label][m_key]
+                ok = np.isfinite(x) & np.isfinite(y)
+                if ok.any():
+                    ax.scatter(x[ok], y[ok], color=mc.color, alpha=0.65, s=18,
+                               label=f"{mc.label} (n={ok.sum()})", zorder=3)
+
+            if row == 0 and col == 0:
+                ax.legend(fontsize=7, loc="lower right")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    return fig
+
+
+def _summary_histograms(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figure:
+    """N_models × 3 grid of histograms: rows = models, cols = metrics."""
+    n_models  = len(MODELS)
+    n_metrics = len(_METRICS_INFO)
+
+    fig, axes = plt.subplots(n_models, n_metrics, figsize=(11.69, 8.27), squeeze=False)
+    fig.suptitle("Similarity Score Distributions",
+                 fontsize=13, fontweight="bold", y=0.99)
+
+    for row, mc in enumerate(MODELS):
+        for col, (m_key, m_label) in enumerate(_METRICS_INFO):
+            ax   = axes[row, col]
+            vals = model_arrays[mc.label][m_key]
+            vals = vals[np.isfinite(vals)]
+
+            ax.set_xlim(-0.05, 1.05)
+            ax.grid(True, alpha=0.3, axis="y")
+            if row == n_models - 1:
+                ax.set_xlabel("Score")
+            if row == 0:
+                ax.set_title(m_label)
+            if col == 0:
+                ax.set_ylabel(f"{mc.label}\nCount")
+
+            if vals.size:
+                n_bins = min(25, max(5, vals.size // 3))
+                ax.hist(vals, bins=n_bins, range=(0, 1),
+                        color=mc.color, alpha=0.75, edgecolor="white", linewidth=0.5)
+                mean_v = float(np.mean(vals))
+                med_v  = float(np.median(vals))
+                ax.axvline(mean_v, color="black",   linestyle="--", linewidth=1.2,
+                           label=f"mean={mean_v:.3f}")
+                ax.axvline(med_v,  color="dimgray", linestyle=":",  linewidth=1.0,
+                           label=f"med={med_v:.3f}")
+                ax.legend(fontsize=7, loc="upper left")
+                ax.text(0.98, 0.95, f"n={vals.size}", transform=ax.transAxes,
+                        ha="right", va="top", fontsize=8)
+            else:
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    return fig
+
+
+def _summary_pages(cases: list[Case]) -> list[plt.Figure]:
+    arrays = _collect_model_arrays(cases)
+    return [_summary_scatter(arrays), _summary_histograms(arrays)]
+
+
+# ---------------------------------------------------------------------------
 # Per-case processing
-# -------------------------
+# ---------------------------------------------------------------------------
+
 def process_case(case_dir: Path) -> Case:
     case_id = case_dir.name
 
-    firescar = case_dir / FIRESCAR_NAME
-    if not firescar.exists():
+    if not (case_dir / FIRESCAR_NAME).exists():
         raise FileNotFoundError(f"Missing {FIRESCAR_NAME}")
 
-    outputs = case_dir / ELM_OUTPUTS_SUBDIR
-    if not outputs.exists():
-        raise FileNotFoundError("Missing outputs/")
+    fire_name, fire_year = _fire_name_year(case_dir)
+    tstop_h, tstop_src   = _tstop_hours(case_dir)
 
-    elm_toa = newest_glob(outputs, ELM_TOA_GLOB)
+    obs_src = _firescar_union(case_dir / FIRESCAR_NAME)
+    ign_src = _read_ignition(case_dir)
 
-    far_toa = case_dir / FARSITE_TOA_REL
-    far_toa = far_toa if far_toa.exists() else None
+    # Resolve TOA paths for every model
+    model_toas = {mc.label: mc.find_toa(case_dir) for mc in MODELS}
 
-    obs_src = read_firescar_union(firescar)
-    ign_src = read_ignition(case_dir)
-    tstop_h, tstop_src = tstop_from_case_data(case_dir)
+    # Use the first available TOA as the spatial reference
+    base_mc = next((mc for mc in MODELS if model_toas.get(mc.label)), None)
+    if base_mc is None:
+        raise FileNotFoundError("No model TOA files found for this case")
 
-    metrics = {"case": case_id, "burn_threshold": BURN_THRESHOLD, "elm_toa": str(elm_toa), "far_toa": str(far_toa) if far_toa else ""}
+    metrics: dict[str, Any] = {
+        "case":            case_id,
+        "burn_threshold":  BURN_THRESHOLD,
+    }
 
-    with rasterio.open(elm_toa) as base:
-        require_projected(base, "ELMFIRE TOA")
+    with rasterio.open(model_toas[base_mc.label]) as base_ds:
+        _require_projected(base_ds, f"{base_mc.label} TOA")
 
         if obs_src.crs is None:
             obs_src = obs_src.set_crs("EPSG:4326")
-        obs_geom_base = obs_src.to_crs(base.crs).iloc[0]
+        obs_geom_base = obs_src.to_crs(base_ds.crs).iloc[0]
         try:
             obs_geom_base = obs_geom_base.buffer(0)
         except Exception:
@@ -709,96 +832,121 @@ def process_case(case_dir: Path) -> Case:
 
         if ign_src.crs is None:
             ign_src = ign_src.set_crs("EPSG:4326")
-        ign_base = ign_src.to_crs(base.crs) if not ign_src.empty else gpd.GeoDataFrame(geometry=[], crs=base.crs)
+        ign_base = ign_src.to_crs(base_ds.crs) if not ign_src.empty \
+                   else gpd.GeoDataFrame(geometry=[], crs=base_ds.crs)
 
-        # true observed area
-        obs_true_m2 = float(gpd.GeoSeries([obs_geom_base], crs=base.crs).to_crs(AREA_CRS).iloc[0].area)
+        obs_true_m2 = float(
+            gpd.GeoSeries([obs_geom_base], crs=base_ds.crs).to_crs(AREA_CRS).iloc[0].area
+        )
 
-        # ELM raster-space metrics
-        elm_sim = burn_mask(base, ELM_BAND, BURN_THRESHOLD)
-        elm_obs = obs_mask(base, obs_geom_base)
-        metrics.update(raster_metrics(elm_obs, elm_sim, pixel_area_m2(base), "elm"))
-
-    # FAR raster-space metrics
-    if far_toa:
-        try:
-            with rasterio.open(far_toa) as far_ds:
-                require_projected(far_ds, "FARSITE TOA")
-                obs_geom_far = obs_src.to_crs(far_ds.crs).iloc[0]
-                try:
-                    obs_geom_far = obs_geom_far.buffer(0)
-                except Exception:
-                    pass
-                far_sim = burn_mask(far_ds, FAR_BAND, BURN_THRESHOLD)
-                far_obs = obs_mask(far_ds, obs_geom_far)
-                metrics.update(raster_metrics(far_obs, far_sim, pixel_area_m2(far_ds), "far"))
-        except Exception as e:
-            log.warning("Case %s: FARSITE metrics failed: %s", case_id, e)
+        # Metrics for each model
+        for mc in MODELS:
+            toa = model_toas.get(mc.label)
+            if not toa:
+                continue
+            try:
+                prefix = mc.label.lower()
+                if toa == model_toas[base_mc.label]:
+                    sim_mask = _burn_mask(base_ds, mc.band, BURN_THRESHOLD)
+                    obs_mask_ = _obs_mask(base_ds, obs_geom_base)
+                    metrics.update(_raster_metrics(obs_mask_, sim_mask, _pixel_area_m2(base_ds), prefix))
+                else:
+                    with rasterio.open(toa) as ds2:
+                        _require_projected(ds2, f"{mc.label} TOA")
+                        obs_geom2 = obs_src.to_crs(ds2.crs).iloc[0]
+                        try:
+                            obs_geom2 = obs_geom2.buffer(0)
+                        except Exception:
+                            pass
+                        sim_mask  = _burn_mask(ds2, mc.band, BURN_THRESHOLD)
+                        obs_mask_ = _obs_mask(ds2, obs_geom2)
+                        metrics.update(_raster_metrics(obs_mask_, sim_mask, _pixel_area_m2(ds2), prefix))
+            except Exception as e:
+                log.warning("Case %s: %s metrics failed: %s", case_id, mc.label, e)
 
     c = Case(
-        case_id=case_id,
-        elm_toa=elm_toa,
-        far_toa=far_toa,
-        obs_geom_base=obs_geom_base,
-        ign_base=ign_base,
-        tstop_h=tstop_h,
-        tstop_src=tstop_src,
-        obs_true_m2=obs_true_m2,
-        metrics=metrics,
+        case_id       = case_id,
+        fire_name     = fire_name,
+        fire_year     = fire_year,
+        model_toas    = model_toas,
+        obs_geom_base = obs_geom_base,
+        ign_base      = ign_base,
+        tstop_h       = tstop_h,
+        tstop_src     = tstop_src,
+        obs_true_m2   = obs_true_m2,
+        metrics       = metrics,
     )
 
-    # Satellite (per-case)
     if SAT_ENABLED:
-        sat = read_case_sat(case_dir)
+        sat = _read_case_sat(case_dir)
         if sat is not None:
-            sat_area = sat.to_crs(AREA_CRS)
-            burn_area_geom = gpd.GeoSeries([c.obs_geom_base], crs=ign_base.crs).to_crs(AREA_CRS).iloc[0]
-            pts = sat_area.loc[sat_area.geometry.within(burn_area_geom)].copy()
+            sat_area     = sat.to_crs(AREA_CRS)
+            burn_geom    = gpd.GeoSeries([obs_geom_base], crs=ign_base.crs).to_crs(AREA_CRS).iloc[0]
+            pts          = sat_area.loc[sat_area.geometry.within(burn_geom)].copy()
             if not pts.empty:
                 discovery = pd.Timestamp(pts["sat_dt"].min())
                 c.discovery_dt = discovery
-                end, times, areas, target = sat_chain(
-                    pts, burn_area_geom, discovery, SAT_BUFFER_M, SAT_CHAIN_MAX_GAP, SAT_COVERAGE_FRAC
+                end, times, areas, target = _sat_chain(
+                    pts, burn_geom, discovery, SAT_BUFFER_M, SAT_CHAIN_MAX_GAP, SAT_COVERAGE_FRAC
                 )
                 c.sat_end, c.sat_times, c.sat_areas_m2, c.sat_target_m2 = end, times, areas, target
-                c.metrics["satellite_end_time"] = str(end) if not pd.isna(end) else ""
+                c.metrics["satellite_end_time"]     = str(end) if not pd.isna(end) else ""
                 c.metrics["satellite_final_area_m2"] = float(areas[-1]) if areas else np.nan
 
     return c
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def iter_cases(root: Path) -> list[Path]:
     return [d for d in sorted(root.iterdir()) if d.is_dir() and (d / FIRESCAR_NAME).exists()]
 
 
-def main():
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    cases = iter_cases(ROOT_DIR)
-    if not cases:
-        raise RuntimeError(f"No cases found under {ROOT_DIR} (need subdirs containing {FIRESCAR_NAME}).")
+    case_dirs_list = iter_cases(ROOT_DIR)
+    if not case_dirs_list:
+        raise RuntimeError(f"No cases found under {ROOT_DIR}")
 
     OUT_PDF.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pass 1: process all cases (no figures yet — we need all results before
+    # writing summary pages)
+    log.info("Processing %d cases …", len(case_dirs_list))
+    results: list[tuple[Path, Case | None, Exception | None]] = []
+    for d in case_dirs_list:
+        try:
+            c = process_case(d)
+            results.append((d, c, None))
+            log.info("OK  %s  (%s %s)  sat_pts=%d",
+                     d.name, c.fire_name or "—", c.fire_year or "—", len(c.sat_times))
+        except Exception as e:
+            log.warning("FAIL %s: %s", d.name, e)
+            results.append((d, None, e))
+
+    good_cases = [c for _, c, _ in results if c is not None]
+    log.info("%d / %d cases OK", len(good_cases), len(results))
+
+    # Pass 2: write PDF — summary pages first, then per-case pages
     rows: list[dict[str, Any]] = []
     with PdfPages(OUT_PDF) as pdf:
-        for d in cases:
-            try:
-                c = process_case(d)
-                pdf.savefig(case_page(c, Path(d)))
-                plt.close("all")
-                rows.append(c.metrics)
-                log.info("Added: %s | far=%s | sat_pts=%d",
-                         d.name,
-                         "yes" if c.far_toa else "no",
-                         len(c.sat_times))
-            except Exception as e:
-                log.warning("Case %s failed: %s", d.name, e)
-                pdf.savefig(error_page(d.name, str(e)))
-                plt.close("all")
+        if good_cases:
+            for fig in _summary_pages(good_cases):
+                pdf.savefig(fig)
+                plt.close(fig)
 
-    df = pd.DataFrame(rows)
-    log.info("Wrote: %s | processed: %d", OUT_PDF, len(df))
-    # df.to_csv(OUT_PDF.with_suffix(".csv"), index=False)
+        for d, c, err in results:
+            if c is not None:
+                pdf.savefig(_case_page(c, d))
+                rows.append(c.metrics)
+            else:
+                pdf.savefig(_error_page(d.name, str(err)))
+            plt.close("all")
+
+    log.info("Wrote %s  (%d pages total)", OUT_PDF, 2 + len(results))
+    # pd.DataFrame(rows).to_csv(OUT_PDF.with_suffix(".csv"), index=False)
 
 
 if __name__ == "__main__":

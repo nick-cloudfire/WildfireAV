@@ -1,153 +1,202 @@
-# pipeline_config.py
+# pipelineConfig.py
 """
-Central configuration for the FirePairs/FlamMap/Elmfire pipeline.
+Central configuration for the Elmfire validation pipeline.
 
-All shared paths, filenames, and key column names live here so that:
-- You only change things in one place.
-- Individual scripts can `from pipeline_config import ...`
-- The main driver (run_pipeline.py) can also rely on the same values.
+All shared paths, filenames, tunable parameters, and column names live here so
+that individual scripts only need to ``import pipelineConfig`` (or
+``import pipelineConfig as cfg``) and never hard-code these values.
+
+Sections
+--------
+1.  User-modifiable parameters   – thresholds, year range, parallelism
+2.  Paths                        – network and scratch roots
+3.  File / directory names       – CSV names, layer names, sub-folder names
+4.  Summary CSV column names     – shared keys for the master DataFrames
+5.  MTBS perimeters & USFS points – field names for raw input data
+6.  LANDFIRE download & splitting – product lists, band order, raster names
+7.  Satellite end-time detection  – tuning knobs for coverage algorithm
+8.  Weather download (OpenMeteo)  – URL, model, column routing
+9.  WindNinja                     – run-time settings for CLI invocation
+10. Elmfire simulation            – namelist parameters (written to .data file)
+11. Barrier file                  – road/water widths and rasterisation options
+12. LFPS API                      – USGS LANDFIRE download service settings
+13. Nelson dead-fuel model        – executable path
 """
 
 from pathlib import Path
 
-# -----------------------------------------------------------------------------
-# USER MODIFIABLE VARIABLES
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 1. USER-MODIFIABLE PARAMETERS
+# =============================================================================
 
-MTBS_AREA_THRESHOLD_ACRES   = 2000
-MIN_FIRE_YEAR               = 2020
-MAX_FIRE_YEAR               = 2025
-DAY_TOLERANCE_DAYS          = 2
-EXPAND                      = 0.8
-LANDFIRE_EMAIL              = "nick@cloudfire.com"
-CONDITIONING_DAYS           = 20
-MAX_WORKERS                 = 12
-MIN_HOURS_DURATION          = 3
+MTBS_AREA_THRESHOLD_ACRES   = 5000      # minimum burn area to include (acres)
+MIN_FIRE_YEAR               = 2022      # earliest fire year to process
+MAX_FIRE_YEAR               = 2025      # latest  fire year to process
+DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
+EXPAND                      = 0.8       # fractional bbox expansion for LANDFIRE download
+LANDFIRE_EMAIL              = "nick@cloudfire.com"  # LFPS job notification e-mail
+CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
+MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
+MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
 
-# -----------------------------------------------------------------------------
-# PATHS
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 2. PATHS
+# =============================================================================
 
-BASE_VALIDATION         = Path(r"/home/nick/elmfire_validation")
+BASE_VALIDATION         = Path(r"/home/nick/elmfire_validation/")
 BASE_DATA               = BASE_VALIDATION / "Data"
-FIRE_ROOT               = BASE_VALIDATION / "FirePairs"
-PERIMETER_DATA_ROOT     = BASE_DATA / "Perimeter Data"
+FIRE_ROOT_LOGIN_NODE    = BASE_VALIDATION / "FirePairs"   # setup output (login node)
+FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FirePairs"  # HPC scratch location
+PERIMETER_DATA_ROOT     = BASE_DATA / "Perimeters"
 SATELLITES_ROOT         = BASE_DATA / "satellites"
 BIN_ROOT                = BASE_DATA / "bin"
 
-# -----------------------------------------------------------------------------
-# FILES
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 3. FILE / DIRECTORY NAMES
+# =============================================================================
 
-FIRE_SUMMARY_CSV                    = FIRE_ROOT / "fire_pairs_summary.csv"
-FIRE_SUMMARY_WITH_SATELLITE_CSV     = FIRE_ROOT / "fire_pairs_summary_with_satellite.csv"
-IGNITION_POINT_SHP_NAME             = "ignition_point.gpkg"
-LANDFIRE_ZIP_NAME                   = "LANDFIRE.zip"
+FIRE_SUMMARY_CSV                = "fire_pairs_summary.csv"
+FIRE_SUMMARY_WITH_SATELLITE_CSV = "fire_pairs_summary_with_satellite.csv"
+IGNITION_POINT_SHP_NAME         = "ignition_point.gpkg"
+BURN_SHAPE_NAME                 = "firescar.gpkg"
+CASE_SAT_GPKG_NAME              = "satellite_points.gpkg"
+LANDFIRE_ZIP_NAME               = "LANDFIRE.zip"
+INPUTS_SUBDIR_NAME              = "inputs"
 
-# -----------------------------------------------------------------------------
-# SUMMARY FILE COLUMN NAMES
-# -----------------------------------------------------------------------------
+# Full paths for the master summary CSVs (live under FIRE_ROOT_LOGIN_NODE)
+FIRE_SUMMARY_CSV_PATH     = FIRE_ROOT_LOGIN_NODE / FIRE_SUMMARY_CSV
+FIRE_SUMMARY_SAT_CSV_PATH = FIRE_ROOT_LOGIN_NODE / FIRE_SUMMARY_WITH_SATELLITE_CSV
 
-COL_FOLDER              = "folder"               # numeric folder id (1, 2, 3, ...)
+# =============================================================================
+# 4. SUMMARY CSV COLUMN NAMES
+# =============================================================================
+
+COL_FOLDER              = "folder"              # zero-padded numeric case id
 COL_POINT_DISCOVERY     = "point_discovery"
 COL_POINT_FIREOUT       = "point_fireout"
+COL_SATELLITE_IGNITION  = "SatelliteIgnitionTime"
 COL_SATELLITE_END       = "SatelliteEndTime"
-EVENT_END_COL           = "EventEndTime"     # <-- new final end column
+COL_SAT_CHAIN_END_TIME  = "SatelliteEnd_chain"
+COL_SAT_END_AREA        = "SatelliteEnd_coverage"  # timestamp when area threshold reached
+EVENT_END_COL           = "EventEndTime"            # min(SatelliteEndTime, point_fireout)
 
-# -----------------------------------------------------------------------------
-# MTBS PERIMETERS & USFS IGNITION POINTS
-# -----------------------------------------------------------------------------
+# Aliases used for wind/weather column routing
+COL_IGNITION_TIME       = COL_POINT_DISCOVERY
+WS_WD_FOLDER_COL        = COL_FOLDER
+WS_WD_START_COL         = COL_SATELLITE_IGNITION
+WS_WD_END_COL           = COL_SATELLITE_END
+
+# =============================================================================
+# 5. MTBS PERIMETERS & USFS IGNITION POINTS
+# =============================================================================
 
 MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perims_DD.shp"
-MTBS_PERIMS_FILTERED        = PERIMETER_DATA_ROOT / "perimeters.gpkg"
 USFS_POINTS_RAW             = BASE_DATA / "National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson"
-USFS_POINTS_MATCHED         = FIRE_ROOT / "all_ignitions.gpkg"
-MTBS_PERIMS_WITH_IGNITIONS  = FIRE_ROOT / "perimeters_ignitions.gpkg"
+
+# These intermediate files are written to / read from FIRE_ROOT_LOGIN_NODE
+MTBS_PERIMS_WITH_IGNITIONS  = FIRE_ROOT_LOGIN_NODE / "perimeters_ignitions.gpkg"
+USFS_POINTS_MATCHED         = FIRE_ROOT_LOGIN_NODE / "all_ignitions.gpkg"
 
 MTBS_ACRES_FIELD    = "BurnBndAc"
-
 PERIM_NAME_FIELD    = "Incid_Name"
-PERIM_DATE_FIELD    = "Ig_Date"  # polygon ignition date (date in shapefile)
-
+PERIM_DATE_FIELD    = "Ig_Date"         # polygon ignition date (date field in shapefile)
 POINT_NAME_FIELD    = "FIRENAME"
-POINT_DISC_FIELD    = "DISCOVERYDATETIME"  # datetime
-POINT_OUT_FIELD     = "FIREOUTDATETIME"     # datetime
+POINT_DISC_FIELD    = "DISCOVERYDATETIME"
+POINT_OUT_FIELD     = "FIREOUTDATETIME"
 
-# -----------------------------------------------------------------------------
-# LANDFIRE DOWNLOAD & SPLITTING
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 6. LANDFIRE DOWNLOAD & SPLITTING
+# =============================================================================
 
-INPUTS_SUBDIR_NAME          = "inputs"
-LANDFIRE_BAND_FILE_NAMES    = [
-                                "dem",     # ELEV2020
-                                "slp",     # SLPD2020
-                                "asp",     # ASP2020
-                                "fbfm40",  # FBFM40
-                                "cc",      # canopy cover
-                                "ch",      # canopy height
-                                "cbh",     # canopy base height
-                                "cbd",     # canopy bulk density
-                            ]
-ADJ_FILE_NAME               = "adj.tif"
-PHI_FILE_NAME               = "phi.tif"
-BARRIER_FILE_NAME           = "barrier.tif"
+# Band order MUST match the LFPS Layer_List used in getLandfireProductsForFireSim.py
+LANDFIRE_BAND_FILE_NAMES = [
+    "dem",      # ELEV2020  – elevation
+    "slp",      # SLPD2020  – slope degrees
+    "asp",      # ASP2020   – aspect degrees
+    "fbfm40",   # FBFM40    – fuel model
+    "cc",       # CC        – canopy cover
+    "ch",       # CH        – canopy height
+    "cbh",      # CBH       – canopy base height
+    "cbd",      # CBD       – canopy bulk density
+]
 
-# -----------------------------------------------------------------------------
-# MOISTURE RASTERS
-# -----------------------------------------------------------------------------
+ADJ_FILE_NAME   = "adj.tif"
+PHI_FILE_NAME   = "phi.tif"
+BARRIER_FILE_NAME = "barrier.tif"
+WS_TIF_NAME     = "ws.tif"
+WD_TIF_NAME     = "wd.tif"
 
-FMC_FILE_NAMES      = ["m1", "m10", "m100"]
+FMC_FILE_NAMES  = ["m1", "m10", "m100"]    # 1-hr, 10-hr, 100-hr fuel moisture
 
-# -----------------------------------------------------------------------------
-# SATELLITE END TIMES
-# -----------------------------------------------------------------------------
+# Raster dtype / nodata used by adj, phi, and barrier outputs
+RASTER_DTYPE    = "float32"
+RASTER_NODATA   = -9999.0
 
-SATELLITE_GPKG              = SATELLITES_ROOT / "Clipped" / "clipped.gpkg"
-CASE_SAT_GPKG_NAME          = "satellite_points.gpkg"
-SATELLITE_LAYER_NAME        = "output"
-SAT_DATE_COL                = "ACQ_DATE"   # Date type
-SAT_TIME_COL                = "ACQ_TIME"   # String / HHMM
-BURN_SHAPE_NAME             = "firescar.gpkg"
-SAT_CHAIN_MAX_GAP_DAYS      = 7
-SAT_HOTSPOT_BUFFER_DIST     = 200 #m
-COVERAGE_FRACTION           = 0.9  # 90% of true burn area
-COL_IGNITION_TIME           = "point_discovery"   # <-- set to your actual CSV column name
-COL_SATELLITE_IGNITION      = "SatelliteIgnitionTime"
-COL_SAT_CHAIN_END_TIME      = "SatelliteEnd_chain"
-COL_SAT_END_AREA            = "SatelliteEnd_coverage"
-SAT_IGNITION_WINDOW_DAYS    = 7
+# =============================================================================
+# 7. SATELLITE END-TIME DETECTION
+# =============================================================================
 
-# -----------------------------------------------------------------------------
-# WS / WD WIND FILES FROM OPEN-METEO
-# -----------------------------------------------------------------------------
+SATELLITE_GPKG          = SATELLITES_ROOT / "clipped.gpkg"
+SATELLITE_LAYER_NAME    = "output"
+SAT_DATE_COL            = "ACQ_DATE"        # date column in satellite layer
+SAT_TIME_COL            = "ACQ_TIME"        # HHMM string column
+SAT_CHAIN_MAX_GAP_DAYS  = 7                 # max gap (days) in a continuous chain
+SAT_HOTSPOT_BUFFER_DIST = 200               # hotspot buffer radius (m, in EPSG:5070)
+COVERAGE_FRACTION       = 0.9               # fraction of effective burn area required
+SAT_IGNITION_WINDOW_DAYS = 7               # search window after point ignition (days)
+SAT_UNION_BLOCK_SIZE    = 64               # geometries per block in batched union
+SAT_BUFFER_RESOLUTION   = 8               # shapely buffer resolution (segments per quadrant)
 
-WS_WD_FOLDER_COL    = COL_FOLDER
-WS_WD_START_COL     = COL_SATELLITE_IGNITION
-WS_WD_END_COL       = COL_SATELLITE_END
-WS_TIF_NAME         = "ws.tif"
-WD_TIF_NAME         = "wd.tif"
-OPENMETEO_URL       = "https://archive-api.open-meteo.com/v1/era5"
-OPENMETEO_MODEL     = "era5"
+# =============================================================================
+# 8. WEATHER DOWNLOAD (OpenMeteo ERA5)
+# =============================================================================
 
-# -----------------------------------------------------------------------------
-# WEATHER.WXS DOWNLOAD (40-DAY PRE-IGNITION)
-#   (downloadWeatherData.py)
-# -----------------------------------------------------------------------------
+WXS_FILE_NAME   = "weather.wxs"
+OPENMETEO_URL   = "https://archive-api.open-meteo.com/v1/era5"
+OPENMETEO_MODEL = "era5"
 
-WXS_FILE_NAME       = "weather.wxs"
+# =============================================================================
+# 9. WINDNINJA
+# =============================================================================
 
+WINDNINJA_MODE              = "wxsFile"             # "wxsFile" (local WXS data) | "wxModel" (downloads forecast)
+WINDNINJA_SUBDIR            = "windninja"           # subfolder under inputs/
+WINDNINJA_CFG_FILENAME      = "windninja_config.cfg"
+WINDNINJA_CONDA_ENV         = "base"                # conda environment with WindNinja_cli
+WINDNINJA_WX_MODEL_TYPE     = "PASTCAST-GCP-HRRR-CONUS-3-KM"
+WINDNINJA_TIME_ZONE         = "UTC"
+WINDNINJA_MESH_UNITS        = "m"
+WINDNINJA_OUTPUT_HEIGHT     = 10.0                  # m above ground
+WINDNINJA_OUTPUT_HEIGHT_UNITS = "m"
+WINDNINJA_MAX_WINDOW_DAYS   = 13    # WindNinja hard-fails above 14 days; 13 is safe
+WINDNINJA_MESH_RESOLUTION_FACTOR = 4  # mesh_resolution = cellsize * this factor
+WINDNINJA_NUM_THREADS       = 1     # CPU threads passed to WindNinja_cli (num_threads)
 
-# -----------------------------------------------------------------------------
-# BARRIER FILE PARAMETERS
-# -----------------------------------------------------------------------------
+# =============================================================================
+# 10. ELMFIRE SIMULATION
+# =============================================================================
+
+ELMFIRE_EXE             = "elmfire"
+ELMFIRE_PATH_TO_GDAL    = "/home/nick/miniconda3/envs/elmfire/bin/"  # adjust per system
+ELMFIRE_DT_METEOROLOGY  = 3600.0    # seconds between wx timesteps
+ELMFIRE_DTDUMP          = 7200.0    # seconds between output dumps
+ELMFIRE_SIMULATION_DT   = 30.0     # simulation time step (seconds)
+ELMFIRE_TARGET_CFL      = 0.2
+ELMFIRE_LH_MC           = 60.0     # live herbaceous moisture content (%)
+ELMFIRE_LW_MC           = 90.0     # live woody moisture content (%)
+ELMFIRE_OUTPUTS_SUBDIR  = "outputs"
+ELMFIRE_SCRATCH_SUBDIR  = "scratch"
+
+# =============================================================================
+# 11. BARRIER FILE
+# =============================================================================
 
 ROADS_GPKG          = BASE_DATA / "Barriers" / "us_roads.gpkg"
 ROADS_LAYER         = "lines"
 WATER_GPKG          = BASE_DATA / "Barriers" / "waterways.gpkg"
 WATER_LAYER         = "lines"
 BACKUP_WATER_SHP    = BASE_DATA / "Barriers" / "us_rivers.shp"
-DTYPE               = "float32"
-NODATA              = -9999
+
 ROAD_CLASS_FIELD    = "highway"
 WATER_CLASS_FIELD   = "waterway"
 OSM_WIDTH_FIELD     = "width"
@@ -155,23 +204,41 @@ USE_OSM_WIDTH_TAG   = False
 WRITE_TEMP_CLIPS    = True
 KEEP_TEMP_CLIPS     = True
 ALL_TOUCHED         = True
-ROAD_WIDTHS_M       = {
-                        "motorway": 30.0,
-                        "trunk": 25.0,
-                        "primary": 16.0,
-                        "secondary": 12.0,
-                        "tertiary": 10.0,
-                        "residential": 8.0,
-                        "service": 6.0,
-                        "track": 4.0,
-                        "path": 2.0,
-                    }
-WATER_WIDTHS_M      = {
-                        "river": 30.0,
-                        "stream": 6.0,
-                        "canal": 10.0,
-                        "ditch": 3.0,
-                        "drain": 2.0,
-                    }
 
+BARRIER_BACKUP_WATER_WIDTH_M = 5.0   # default width for backup river features (m)
+BARRIER_BACKUP_MATCH_TOL_M   = 1.0   # tolerance to consider primary/backup as overlapping (m)
 
+ROAD_WIDTHS_M = {
+    "motorway":    30.0,
+    "trunk":       25.0,
+    "primary":     16.0,
+    "secondary":   12.0,
+    "tertiary":    10.0,
+    "residential":  8.0,
+    "service":      6.0,
+    "track":        4.0,
+    "path":         2.0,
+}
+WATER_WIDTHS_M = {
+    "river":  30.0,
+    "stream":  6.0,
+    "canal":  10.0,
+    "ditch":   3.0,
+    "drain":   2.0,
+}
+
+# =============================================================================
+# 12. LFPS API (USGS LANDFIRE download service)
+# =============================================================================
+
+LFPS_BASE_API           = "https://lfps.usgs.gov"
+LFPS_TERRAIN_PRODUCTS   = ["LF2020_Elev", "LF2020_SlpD", "LF2020_Asp"]  # always downloaded
+LFPS_POLL_SLEEP_S       = 10    # seconds between job-status polls
+LFPS_POLL_MAX_TRIES     = 300   # max polls before timeout (~50 min)
+LFPS_CONCURRENT_JOBS    = 60     # concurrent LFPS jobs in prefetchLandfire.py
+
+# =============================================================================
+# 13. NELSON DEAD-FUEL MODEL
+# =============================================================================
+
+NELSON_EXE = BASE_DATA / "nelson_csharp" / "bin" / "Release" / "net8.0" / "nelson_csharp"

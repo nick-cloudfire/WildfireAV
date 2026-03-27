@@ -1,91 +1,79 @@
-# -*- coding: utf-8 -*-
+# splitLandfireTifBands.py
 """
-Split LANDFIRE.tif into individual band files for each fire folder.
+Step 2 of runPipelineParallel: split LANDFIRE.tif into individual band files.
 
-For each folder under FIREPAIRS_ROOT:
-    - Look for LANDFIRE.tif
-    - Create an "inputs" subfolder
-    - Save each band as:
-        dem.tif, slp.tif, asp.tif, fbfm40.tif,
-        cc.tif, ch.tif, cbh.tif, cbd.tif
+The LFPS download produces a single multi-band GeoTIFF.  Band order matches
+the Layer_List submitted in getLandfireProductsForFireSim.py and is reflected
+in pipelineConfig.LANDFIRE_BAND_FILE_NAMES:
 
-Assumes the LFPS Layer_List order used in the downloader is:
-    [ELEV2020,
-     SLPD2020,
-     ASP2020,
-     <version>FBFM40<suffix>,
-     <version>CC<suffix>,
-     <version>CH<suffix>,
-     <version>CBH<suffix>,
-     <version>CBD<suffix>]
+    Band 1 → dem.tif   (ELEV2020)
+    Band 2 → slp.tif   (SLPD2020)
+    Band 3 → asp.tif   (ASP2020)
+    Band 4 → fbfm40.tif
+    Band 5 → cc.tif
+    Band 6 → ch.tif
+    Band 7 → cbh.tif
+    Band 8 → cbd.tif
 
-So band indices map to:
-    1 -> dem
-    2 -> slp
-    3 -> asp
-    4 -> fbfm40
-    5 -> cc
-    6 -> ch
-    7 -> cbh
-    8 -> cbd
+Output: inputs/<band_name>.tif  (single-band GeoTIFF, same CRS/transform as source)
 """
 
 from pathlib import Path
-import pipelineConfig
+
 import rasterio
 
-FIREPAIRS_ROOT      = pipelineConfig.FIRE_ROOT
-INPUTS_SUBFOLDER    = pipelineConfig.INPUTS_SUBDIR_NAME
-BAND_FILE_NAMES     = pipelineConfig.LANDFIRE_BAND_FILE_NAMES
+import pipelineConfig
 
-def process_folder(folder: Path):
-    """
-    For a single fire folder:
-        - open LANDFIRE.tif
-        - log band descriptions (if present)
-        - create /inputs
-        - write each band as a separate single-band GeoTIFF
-    """
+FIREPAIRS_ROOT  = pipelineConfig.FIRE_ROOT
+INPUTS_SUBDIR   = pipelineConfig.INPUTS_SUBDIR_NAME
+BAND_FILE_NAMES = pipelineConfig.LANDFIRE_BAND_FILE_NAMES
+
+
+def process_folder(folder: Path) -> None:
     tif_path = folder / "LANDFIRE.tif"
     if not tif_path.exists():
-        print(f"No LANDFIRE.tif in {folder}, skipping.")
+        print(f"  No LANDFIRE.tif in {folder}, skipping.")
         return
 
-    inputs_dir = folder / INPUTS_SUBFOLDER
+    inputs_dir = folder / INPUTS_SUBDIR
     inputs_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n=== Processing {tif_path} ===")
+    first_band = inputs_dir / f"{BAND_FILE_NAMES[0]}.tif"
+    if first_band.exists():
+        print(f"  Skipped — {first_band.name} already exists.")
+        return
 
+    print(f"\nSplitting {tif_path} …")
     with rasterio.open(tif_path) as src:
         band_count = src.count
         if band_count < len(BAND_FILE_NAMES):
             print(
-                f"  Warning: expected at least {len(BAND_FILE_NAMES)} bands "
-                f"(terrain + fuels), but raster has {band_count}. "
-                f"Only splitting first {band_count}."
+                f"  Warning: expected ≥{len(BAND_FILE_NAMES)} bands "
+                f"but raster has {band_count}. Splitting available bands only."
             )
 
-        # Base profile for single-band outputs
         base_profile = src.profile.copy()
-        base_profile.update(count=1)
+        base_profile.update(count=1, driver="GTiff")
 
-        # Loop over bands and output names
-        for band_index, out_name in enumerate(BAND_FILE_NAMES, start=1):
-            if band_index > band_count:
+        for band_idx, name in enumerate(BAND_FILE_NAMES, start=1):
+            if band_idx > band_count:
                 break
-            out_path = inputs_dir / f"{out_name}.tif"
-            data = src.read(band_index)
-            profile = base_profile.copy()
-            profile["driver"] = "GTiff"
-            with rasterio.open(out_path, "w", **profile) as dst:
+            out_path = inputs_dir / f"{name}.tif"
+            data = src.read(band_idx)
+            with rasterio.open(out_path, "w", **base_profile) as dst:
                 dst.write(data, 1)
-            print(f"  Wrote band {band_index} -> {out_path}")
+            print(f"  Band {band_idx} → {out_path.name}")
 
-def main():
+
+def main(case_dir=None) -> None:
+    if case_dir is not None:
+        process_folder(Path(case_dir))
+        return
+
     root = Path(FIREPAIRS_ROOT)
-    folders = sorted(p for p in root.iterdir() if p.is_dir())
-    for folder in folders:
+    for folder in sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit()):
         process_folder(folder)
+
 
 if __name__ == "__main__":
     main()

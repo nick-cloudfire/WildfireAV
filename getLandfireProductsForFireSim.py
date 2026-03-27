@@ -1,97 +1,96 @@
-# -*- coding: utf-8 -*-
+# getLandfireProductsForFireSim.py
 """
-Parallel LANDFIRE downloader (threaded).
-Parallelises the slow I/O: submit -> poll -> download.
+Step 1 of runPipelineParallel: download LANDFIRE rasters via the LFPS API.
+
+For each case folder:
+1. Read the burn perimeter (firescar.gpkg) and expand its bounding box.
+2. Determine the appropriate LANDFIRE dataset year from the fire year.
+3. Submit a job to the USGS LFPS API.
+4. Poll until the job succeeds, then download and unpack the ZIP.
+
+Output per case
+---------------
+- LANDFIRE.tif   – multi-band raster (bands match LANDFIRE_BAND_FILE_NAMES order)
+- LANDFIRE.tfw   – world file (kept for reference)
+
+The script is safe to re-run: it skips folders where LANDFIRE.tif already exists.
 """
+
+from __future__ import annotations
 
 import time
 import zipfile
 import shutil
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
+
 import geopandas as gpd
 import pandas as pd
-import requests
+import pipelineConfig as cfg
+from case_metadata import read_case_metadata
+from parallel_api import make_logger, get_thread_session
 from pyproj import CRS
-import pipelineConfig
-from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# CONFIGURATION
+# Config
 # ---------------------------------------------------------------------------
 
-FIREPAIRS_ROOT      = pipelineConfig.FIRE_ROOT
-SUMMARY_CSV         = pipelineConfig.FIRE_SUMMARY_CSV
-EMAIL               = pipelineConfig.LANDFIRE_EMAIL
-EXPAND              = pipelineConfig.EXPAND
-TERRAIN_PRODUCTS    = ["ELEV2020", "SLPD2020", "ASP2020"]
-BASE_API            = "https://lfps.usgs.gov"
-FIRESCAR_NAME       = pipelineConfig.BURN_SHAPE_NAME
+FIREPAIRS_ROOT  = cfg.FIRE_ROOT
+EMAIL           = cfg.LANDFIRE_EMAIL
+EXPAND          = cfg.EXPAND
+FIRESCAR_NAME   = cfg.BURN_SHAPE_NAME
+BASE_API        = cfg.LFPS_BASE_API
+TERRAIN_PRODUCTS = list(cfg.LFPS_TERRAIN_PRODUCTS)   # always downloaded
+POLL_SLEEP_S    = cfg.LFPS_POLL_SLEEP_S
+POLL_MAX_TRIES  = cfg.LFPS_POLL_MAX_TRIES
 
-# API Download knobs
-MAX_WORKERS         = pipelineConfig.MAX_WORKERS          # overall folder concurrency
-MAX_DOWNLOADS       = 3        # throttle downloads separately (optional)
-POLL_SLEEP_S        = 10
-POLL_MAX_TRIES      = 300
-_download_sem       = threading.Semaphore(MAX_WORKERS)
-_PRINT_LOCK         = threading.Lock()
+# ---------------------------------------------------------------------------
+# LANDFIRE dataset version tables
+# ---------------------------------------------------------------------------
 
-FBFM40_CODES = {
-    2019: "200F40_19",
-    2020: "200F40_20",
-    2023: "230FBFM40",
-    2024: "240FBFM40",
-    2025: "250FBFM40",
-}
+# Maps fire year → (version prefix, version suffix) for CC/CH/CBH/CBD products
 LF_FUEL_VERSIONS = {
-    2019: ("200", "_19"),
-    2020: ("200", "_20"),
-    2023: ("230", ""),
-    2024: ("240", ""),
-    2025: ("250", ""),
+    2016: ("LF2016_"),
+    2022: ("LF2022_"),
+    2023: ("LF2023_"),
+    2024: ("LF2024_"),
 }
+
 DATASET_YEARS = sorted(LF_FUEL_VERSIONS.keys())
 
 
-def make_logger(prefix: str):
-    pfx = f"[{prefix}] "
-    def log(msg=""):
-        ts = datetime.now().strftime("%H:%M:%S")
-        text = "" if msg is None else str(msg)
-        lines = text.splitlines() or [""]
-        with _PRINT_LOCK:
-            for line in lines:
-                print(f"{ts} {pfx}{line}", flush=True)
-    return log
+# ---------------------------------------------------------------------------
+# Product list builder
+# ---------------------------------------------------------------------------
 
-def build_products_for_fire_year(fire_year, log=print):
-    
+def build_products_for_fire_year(fire_year, log=print) -> list[str]:
+    """Return the LFPS Layer_List for the best LANDFIRE dataset year."""
     if fire_year is None or pd.isna(fire_year):
-        return min(DATASET_YEARS)
-    y = int(fire_year)
-    candidates = [dy for dy in DATASET_YEARS if dy <= y]
-    dataset_year = max(candidates) if candidates else min(DATASET_YEARS)
-    prefix, suff = LF_FUEL_VERSIONS[dataset_year]
+        dataset_year = min(DATASET_YEARS)
+    else:
+        y = int(fire_year)
+        candidates = [dy for dy in DATASET_YEARS if dy <= y]
+        dataset_year = max(candidates) if candidates else min(DATASET_YEARS)
 
-    fbfm40_code = FBFM40_CODES[dataset_year]
-
-    log(f"Using LF dataset year {dataset_year}, (prefix '{prefix}', suffix '{suff}', FBFM40='{fbfm40_code}')"
+    prefix = LF_FUEL_VERSIONS[dataset_year]
+    log(
+        f"LF dataset year {dataset_year} "
+        f"(prefix='{prefix}')"
     )
 
     fuels_canopy = [
-        fbfm40_code,
-        f"{prefix}CC{suff}",
-        f"{prefix}CH{suff}",
-        f"{prefix}CBH{suff}",
-        f"{prefix}CBD{suff}",
+        f"{prefix}FBFM40",
+        f"{prefix}CC",
+        f"{prefix}CH",
+        f"{prefix}CBH",
+        f"{prefix}CBD",
     ]
-
     products = TERRAIN_PRODUCTS + fuels_canopy
     log(f"  Products: {products}")
     return products
 
-def best_projection_for_bbox(bounds):
+
+def _best_utm_crs(bounds) -> CRS:
+    """Return a UTM CRS appropriate for the centre of the given WGS84 bounds."""
     xmin, ymin, xmax, ymax = bounds
     mid_lon = (xmin + xmax) / 2
     mid_lat = (ymin + ymax) / 2
@@ -99,57 +98,54 @@ def best_projection_for_bbox(bounds):
     epsg = 32600 + utm_zone if mid_lat >= 0 else 32700 + utm_zone
     return CRS.from_epsg(epsg)
 
+
 # ---------------------------------------------------------------------------
-# LFPS COMMUNICATION
+# LFPS API helpers
 # ---------------------------------------------------------------------------
 
-# Optional: a Session improves throughput by reusing connections per thread
-_thread_local = threading.local()
-
-def _get_session():
-    if not hasattr(_thread_local, "session"):
-        s = requests.Session()
-        _thread_local.session = s
-    return _thread_local.session
-
-def submit_job(products, bbox, projection):
+def _submit_job(products: list[str], bbox: tuple, projection: int) -> str:
     params = {
-        "Email": EMAIL,
-        "Layer_List": ";".join(products),
-        "Area_of_Interest": " ".join(str(x) for x in bbox),
+        "Email":             EMAIL,
+        "Layer_List":        ";".join(products),
+        "Area_of_Interest":  " ".join(str(x) for x in bbox),
         "Output_Projection": str(projection),
     }
-    s = _get_session()
+    s = get_thread_session()
     r = s.get(f"{BASE_API}/api/job/submit", params=params, timeout=60)
     r.raise_for_status()
-    js = r.json()
-    return js["jobId"]
+    return r.json()["jobId"]
 
-def poll_job(job_id, log=print):
-    for _ in range(300):
-        r = requests.get(f"{BASE_API}/api/job/status", params={"JobId": job_id})
+
+def _poll_job(job_id: str, log=print) -> dict:
+    t0 = time.monotonic()
+    last_status = None
+    last_queue_pos = None
+    for _ in range(POLL_MAX_TRIES):
+        r = get_thread_session().get(
+            f"{BASE_API}/api/job/status", params={"JobId": job_id}, timeout=30
+        )
+        r.raise_for_status()
         js = r.json()
         status = js.get("status")
-        log(status)
-
+        queue_pos = js.get("queuePosition")
+        elapsed = int(time.monotonic() - t0)
+        if status != last_status or queue_pos != last_queue_pos:
+            if queue_pos is not None and status not in ("Succeeded", "Failed"):
+                log(f"  [{elapsed:4d}s] {status} (queue position: {queue_pos})")
+            else:
+                log(f"  [{elapsed:4d}s] {status}")
+            last_status = status
+            last_queue_pos = queue_pos
         if status == "Succeeded":
             return js
         if status == "Failed":
-            raise RuntimeError(js)
-
-        time.sleep(10)
-
-    raise TimeoutError("LFPS job timeout")
+            raise RuntimeError(f"LFPS job {job_id} failed: {js}")
+        time.sleep(POLL_SLEEP_S)
+    raise TimeoutError(f"LFPS job {job_id} timed out after {POLL_MAX_TRIES} polls")
 
 
-def extract_url(status_json):
-    url = status_json.get("outputFile")
-    if not url:
-        raise RuntimeError("No download URL in LFPS response")
-    return url
-
-def download_zip(url, out_path):
-    s = _get_session()
+def _download_zip(url: str, out_path: Path) -> None:
+    s = get_thread_session()
     with s.get(url, stream=True, timeout=300) as r:
         r.raise_for_status()
         with open(out_path, "wb") as f:
@@ -157,66 +153,74 @@ def download_zip(url, out_path):
                 if chunk:
                     f.write(chunk)
 
+
 # ---------------------------------------------------------------------------
-# ZIP HANDLING
+# ZIP unpacking
 # ---------------------------------------------------------------------------
 
-def unpack_and_clean(folder, zip_path):
-    folder = Path(folder)
-    temp = folder / "_tmp"
-    if temp.exists():
-        shutil.rmtree(temp)
-    temp.mkdir()
+def _unpack_and_clean(folder: Path, zip_path: Path) -> None:
+    tmp = folder / "_tmp"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir()
 
     with zipfile.ZipFile(zip_path, "r") as z:
-        z.extractall(temp)
+        z.extractall(tmp)
 
-    tifs = list(temp.rglob("*.tif"))
-    tfws = list(temp.rglob("*.tfw"))
+    tifs = list(tmp.rglob("*.tif"))
+    tfws = list(tmp.rglob("*.tfw"))
 
     if tifs:
         (folder / "LANDFIRE.tif").unlink(missing_ok=True)
         tifs[0].rename(folder / "LANDFIRE.tif")
-
     if tfws:
         (folder / "LANDFIRE.tfw").unlink(missing_ok=True)
         tfws[0].rename(folder / "LANDFIRE.tfw")
 
     zip_path.unlink(missing_ok=True)
-    shutil.rmtree(temp)
+    shutil.rmtree(tmp)
+
 
 # ---------------------------------------------------------------------------
-# WORKER
+# Per-folder worker
 # ---------------------------------------------------------------------------
 
-def process_folder(folder: Path, summary: pd.DataFrame):
-    prefix = f"[{folder.name}]"
+def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
+    """
+    Download LANDFIRE for one case folder.
 
-    def log(msg):
-        # keeps multi-thread prints from interleaving mid-line
-        with _PRINT_LOCK:
-            print(f"{prefix}{msg}")
+    Returns (folder_name, success, message).
+    """
+    if log is None:
+        log = make_logger(folder.name)
 
     firescar = folder / FIRESCAR_NAME
     if not firescar.exists():
-        return (folder.name, True, "skipped (no firescar file)") #Name, Success, Message
+        return (folder.name, True, "skipped (no firescar)")
     lf_tif = folder / "LANDFIRE.tif"
     if lf_tif.exists():
-        log("=== skipped - already exists ===")
-        return (folder.name, True, "skipped (LANDFIRE.tif exists)")
+        log("skipped – LANDFIRE.tif already exists")
+        return (folder.name, True, "skipped (already exists)")
 
-    log(f"\n=== Processing folder {folder.name} ===")
+    log(f"Processing {folder.name}")
 
-    fire_year = summary.loc[folder.name, "fire_year"]
+    # Determine fire year
+    if summary is not None:
+        fire_year = summary.loc[folder.name, "fire_year"]
+    else:
+        meta = read_case_metadata(folder)
+        fire_year = pd.to_datetime(
+            meta.get("perim_ignition"), errors="coerce"
+        ).year
+
     products = build_products_for_fire_year(fire_year, log=log)
 
+    # Build expanded bbox (WGS84)
     g = gpd.read_file(firescar)
     if g.crs is None or g.crs.to_epsg() != 4326:
         g = g.to_crs(4326)
-
     bounds = g.total_bounds
-    w = bounds[2] - bounds[0]
-    h = bounds[3] - bounds[1]
+    w, h   = bounds[2] - bounds[0], bounds[3] - bounds[1]
     expanded = (
         bounds[0] - EXPAND * w / 2,
         bounds[1] - EXPAND * h / 2,
@@ -224,69 +228,72 @@ def process_folder(folder: Path, summary: pd.DataFrame):
         bounds[3] + EXPAND * h / 2,
     )
 
-    crs = best_projection_for_bbox(expanded)
-    epsg = crs.to_epsg()
-    log(f"  CRS: EPSG:{epsg}")
+    epsg = _best_utm_crs(expanded).to_epsg()
+    log(f"  Output CRS: EPSG:{epsg}")
 
-    log("  Sending job...")
-    job_id = submit_job(products, expanded, epsg)
+    log("  Submitting LFPS job …")
+    job_id = _submit_job(products, expanded, epsg)
+    log(f"  Job ID: {job_id}")
+    log(f"  Status URL: {BASE_API}/api/job/status?JobId={job_id}")
 
-    log("  Waiting...")
-    status_json = poll_job(job_id, log=log)
+    log("  Polling …")
+    status_json = _poll_job(job_id, log=log)
 
-    url = extract_url(status_json)
+    url = status_json.get("outputFile")
+    if not url:
+        raise RuntimeError("No download URL in LFPS response")
     zip_path = folder / "LANDFIRE.zip"
 
-    log("  Downloading...")
-    with _download_sem:
-        download_zip(url, zip_path)
+    log("  Downloading …")
+    _download_zip(url, zip_path)
 
-    log("  Unpacking...")
-    unpack_and_clean(folder, zip_path)
+    log("  Unpacking …")
+    _unpack_and_clean(folder, zip_path)
 
     log("  Done.")
     return (folder.name, True, "done")
 
+
 # ---------------------------------------------------------------------------
-# MAIN
+# main
 # ---------------------------------------------------------------------------
 
-def main():
+def main(case_dir=None) -> None:
     root = Path(FIREPAIRS_ROOT)
-    summary_df = pd.read_csv(SUMMARY_CSV)
+
+    if case_dir is not None:
+        process_folder(Path(case_dir))
+        return
+
+    # Batch mode: load summary to get fire years without reading each metadata file
+    summary_path = cfg.FIRE_SUMMARY_CSV_PATH   # full path under FIRE_ROOT_LOGIN_NODE
+    summary_df = pd.read_csv(summary_path)
     summary_df["folder"] = summary_df["folder"].astype(str).str.zfill(5)
-    summary_df["perim_ignition"] = pd.to_datetime(summary_df["perim_ignition"], errors="coerce", utc=True)
+    summary_df["perim_ignition"] = pd.to_datetime(
+        summary_df["perim_ignition"], errors="coerce", utc=True
+    )
     summary_df["fire_year"] = summary_df["perim_ignition"].dt.year
     summary = summary_df.set_index("folder")
 
-    folders = sorted([p for p in root.iterdir() if p.is_dir()])
+    # Collect folders that still need work
+    todo = [
+        p for p in sorted(root.iterdir())
+        if p.is_dir() and p.name.isdigit()
+        and (p / FIRESCAR_NAME).exists()
+        and not (p / "LANDFIRE.tif").exists()
+    ]
 
-    # Optional: queue only folders that need work
-    todo = []
-    for folder in folders:
-        firescar = folder / FIRESCAR_NAME
-        if not firescar.exists():
-            continue
-        lf_tif = folder / "LANDFIRE.tif"
-        if lf_tif.exists():
-            continue
-        todo.append(folder)
+    print(f"Processing {len(todo)} folders …")
 
-    print(f"Parallel processing {len(todo)} folders with MAX_WORKERS={MAX_WORKERS}...")
+    results = [process_folder(f, summary) for f in todo]
 
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(process_folder, f, summary) for f in todo]
-        for fut in as_completed(futures):
-            results.append(fut.result())
-
-    # Summary
-    ok = sum(1 for _, success, _ in results if success)
+    ok   = sum(1 for _, s, _ in results if s)
     fail = len(results) - ok
     print(f"\nFinished: {ok} ok, {fail} failed/skipped.")
     for name, success, msg in sorted(results):
         if not success:
             print(f"  FAIL {name}: {msg}")
+
 
 if __name__ == "__main__":
     main()
