@@ -1,10 +1,10 @@
-# Elmfire Validation Pipeline
+# ELMFIRE / FARSITE Validation Pipeline
 
 Automated end-to-end pipeline that matches historical MTBS burn perimeters to
-USFS ignition points, downloads all required geospatial inputs, runs the
-[WindNinja](https://github.com/firelab/windninja) wind model and the Nelson
-dead-fuel-moisture model, and executes [Elmfire](https://github.com/lautenberger/elmfire)
-to produce time-of-arrival rasters for validation.
+USFS ignition points, downloads all required geospatial inputs, runs wind and
+fuel-moisture models, executes [ELMFIRE](https://github.com/lautenberger/elmfire)
+and [FARSITE](https://www.fs.usda.gov/rmrs/tools/farsite), and produces a
+multi-page validation PDF comparing simulated vs. observed burn areas.
 
 ---
 
@@ -12,36 +12,48 @@ to produce time-of-arrival rasters for validation.
 
 ```
 Data/
-├── pipelineConfig.py               ← single source of truth for all settings
-├── parallel_api.py                 ← shared utilities (Tee, logging, retries, parallelism)
-├── case_metadata.py                ← read/write per-case JSON metadata
+├── pipelineConfig.py                  ← single source of truth for all settings
+├── parallel_api.py                    ← shared utilities (Tee, logging, retries)
+├── case_metadata.py                   ← read/write per-case JSON metadata
 
-# Setup scripts (run once locally)
-├── setupPipeline.py                ← orchestrates steps 1-5 below
-├── processScarsAndPoints.py        ← step 1: match perimeters to ignition points
-├── separateScarsAndPointsToCases.py ← step 2: create numbered case folders
-├── getSatelliteEndTimes.py         ← step 3: compute satellite start/end times
-├── eraseInvalidCases.py            ← step 4: remove short/invalid cases
+# Master entry point
+├── run_validation.py                  ← clean / setup / run / pdf phases
 
-# Per-case HPC scripts (run in parallel per case)
-├── runPipelineParallel.py          ← orchestrates steps 1-9 below
-├── getLandfireProductsForFireSim.py ← step 1: download LANDFIRE from LFPS
-├── splitLandfireTifBands.py        ← step 2: split multi-band LANDFIRE.tif
-├── makePhiAndAdjFiles.py           ← step 3: create adj/phi rasters
-├── downloadWeatherData.py          ← step 4: fetch ERA5 weather (OpenMeteo)
-├── downloadAndRunWindninja.py      ← step 5: run WindNinja
-├── wn_to_geotiff.py                ← helper: convert WindNinja ASCII → GeoTIFF
-├── applyNelsonModel.py             ← step 6: compute dead-fuel moisture
-├── getBarrierFile.py               ← step 7: rasterise road/water barriers
-├── createElmfireInputFiles.py      ← step 8: write Elmfire namelist (.data)
-├── runElmfireCase.py               ← step 9: execute Elmfire
+# Setup scripts (run once, locally)
+├── setupPipeline.py                   ← orchestrates setup steps 1-5
+├── processScarsAndPoints.py           ← step 1: match perimeters → ignition points
+├── separateScarsAndPointsToCases.py   ← step 2: create numbered case folders
+├── getSatelliteEndTimes.py            ← step 3: compute satellite start/end times
+├── eraseInvalidCases.py               ← step 4: remove short/invalid cases
+
+# Per-case simulation pipeline (run in parallel)
+├── runPipelineParallel.py             ← orchestrates per-case steps (see below)
+├── getLandfireProductsForFireSim.py   ← step 1:  download LANDFIRE from LFPS
+├── splitLandfireTifBands.py           ← step 2:  split multi-band LANDFIRE.tif
+├── makePhiAndAdjFiles.py              ← step 3:  create adj/phi rasters
+├── downloadWeatherData.py             ← step 4:  fetch ERA5 weather (OpenMeteo)
+├── downloadAndRunWindninja_WXS.py     ← step 5a: WindNinja (WINDNINJA_SOURCE=install)
+├── downloadAndRunWindninja_wxModel.py ← step 5b: WindNinja wx-model variant
+├── wn_to_geotiff.py                   ← helper: convert WindNinja ASCII → GeoTIFF
+├── applyNelsonModel.py                ← step 6:  compute dead-fuel moisture
+├── getBarrierFile.py                  ← step 7:  rasterise road/water barriers
+├── createElmfireInputFiles.py         ← step 8:  write ELMFIRE namelist (.data)
+├── prepareFarsite.py                  ← step 9:  create FARSITE inputs (LCP, etc.)
+├── runElmfireCase.py                  ← step 10: execute ELMFIRE
+├── runFarsiteCase.py                  ← step 11: execute FARSITE via Wine
+├── farsiteWindToGeotiff.py            ← step 12: extract ws/wd from FARSITE winds
+                                          (only when WINDNINJA_SOURCE=farsite)
+
+# Validation report
+├── getValidationPDF.py                ← generate multi-page validation PDF
 
 # Data directories
-├── Barriers/                       ← OSM roads/waterways GeoPackages + backup rivers SHP
-├── Perimeters/                     ← MTBS burn perimeters shapefile
-├── satellites/                     ← VIIRS/MODIS hotspot GeoPackage
-├── nelson_csharp/                  ← Nelson dead-fuel model (C# executable)
-└── bin/                            ← GDAL and other binaries
+├── Barriers/                          ← OSM roads/waterways GeoPackages
+├── Perimeters/                        ← MTBS burn perimeters shapefile
+├── satellites/                        ← VIIRS/MODIS hotspot GeoPackage
+├── FB/                                ← FARSITE SDK (bin/TestFARSITE.exe, etc.)
+├── nelson_csharp/                     ← Nelson dead-fuel model (C# executable)
+└── bin/                               ← GDAL and other binaries
 ```
 
 ---
@@ -52,13 +64,215 @@ Data/
 |---|---|
 | Python ≥ 3.11 | – |
 | geopandas, rasterio, fiona, pyproj, shapely | conda/pip |
-| pandas, numpy, requests | conda/pip |
+| pandas, numpy, requests, matplotlib | conda/pip |
 | GDAL CLI (`gdal_translate`, `gdalbuildvrt`, `ogr2ogr`) | on `$PATH` |
-| WindNinja CLI (`WindNinja_cli`) | conda env `base` (configurable) |
-| Elmfire executable (`elmfire`) | on `$PATH` |
+| WindNinja CLI (`WindNinja_cli`) | conda env (see `WINDNINJA_CONDA_ENV`) |
+| ELMFIRE executable (`elmfire`) | on `$PATH` |
+| FARSITE SDK (`TestFARSITE.exe`) | `pipelineConfig.FARSITE_FB_DIR` |
+| Wine (for running FARSITE on Linux/WSL) | on `$PATH` |
 | Nelson C# model | `pipelineConfig.NELSON_EXE` |
 | LFPS API access (USGS email) | `pipelineConfig.LANDFIRE_EMAIL` |
 | OpenMeteo ERA5 (free, no key) | `pipelineConfig.OPENMETEO_URL` |
+
+---
+
+## WSL setup
+
+This pipeline is designed to run inside **Windows Subsystem for Linux (WSL2)**
+with Ubuntu 24.04.  FARSITE runs as a Windows `.exe` via Wine so both Linux
+and Windows tooling are available in the same environment.
+
+### 1. Enable WSL2
+
+In an elevated PowerShell:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+wsl --set-default-version 2
+```
+
+Restart when prompted, then open the Ubuntu 24.04 terminal and create your
+Linux user account.
+
+### 2. Install Miniconda
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+# Follow the prompts; let the installer run conda init
+source ~/.bashrc
+```
+
+### 3. Create the Python environment
+
+```bash
+conda create -n elmfire python=3.11 -y
+conda activate elmfire
+
+# Geospatial stack
+conda install -c conda-forge \
+    geopandas rasterio fiona pyproj shapely \
+    pandas numpy requests matplotlib \
+    gdal -y
+```
+
+All GDAL CLI tools (`gdal_translate`, `gdalbuildvrt`, `ogr2ogr`) come with the
+`gdal` conda package and are available on PATH inside the environment.
+
+### 4. Install ELMFIRE
+
+Follow the [ELMFIRE build instructions](https://github.com/lautenberger/elmfire).
+The compiled `elmfire` executable must be on PATH inside the `elmfire` conda
+environment.  Set `ELMFIRE_PATH_TO_GDAL` in `pipelineConfig.py` to the `bin/`
+directory of the same conda environment, e.g.:
+
+```python
+ELMFIRE_PATH_TO_GDAL = "/home/<user>/miniconda3/envs/elmfire/bin/"
+```
+
+### 5. Install WindNinja (optional — only needed for `WINDNINJA_SOURCE="install"`)
+
+```bash
+# WindNinja must be available in a conda environment (default: "base")
+conda activate base
+conda install -c conda-forge windninja -y
+conda activate elmfire
+```
+
+Set `WINDNINJA_CONDA_ENV` in `pipelineConfig.py` to the environment name that
+has `WindNinja_cli` on its PATH (default `"base"`).
+
+### 6. Install Wine (for FARSITE)
+
+```bash
+sudo dpkg --add-architecture i386
+sudo apt update
+sudo apt install -y wine wine32 wine64 libwine libwine:i386 fonts-wine
+```
+
+Verify:
+```bash
+wine --version   # should print wine-x.x.x
+```
+
+On first use Wine will initialise its prefix (`.wine/`) automatically.
+No further Wine configuration is needed — the pipeline sets all required
+environment variables (`GDAL_DATA`, `PROJ_LIB`, `WINEDEBUG`) at runtime.
+
+### 7. Install the Nelson dead-fuel moisture model
+
+The Nelson model is a .NET 8 C# project included in `nelson_csharp/`.
+
+```bash
+# Install .NET 8 SDK
+sudo apt install -y dotnet-sdk-8.0
+
+# Build the release binary
+cd /home/<user>/elmfire_validation/Data/nelson_csharp
+dotnet publish -c Release
+```
+
+The compiled binary path is set automatically by `pipelineConfig.NELSON_EXE`.
+
+### 8. Install FARSITE SDK
+
+The FARSITE SDK (`FB/`) is not included in this repository.  Obtain
+`TestFARSITE.exe` and its supporting files from Missoula Fire Sciences Lab and
+place them at the path configured in `pipelineConfig.FARSITE_FB_DIR`.
+The expected layout is:
+
+```
+FB/
+├── bin/
+│   ├── TestFARSITE.exe
+│   ├── gdal-data/
+│   └── proj9/share/
+└── setenv.bat
+```
+
+### 9. Clone and configure
+
+```bash
+cd /home/<user>/elmfire_validation
+git clone https://github.com/nick-cloudfire/autoValidate.git Data
+cd Data
+```
+
+Edit `pipelineConfig.py` — at minimum update:
+
+```python
+BASE_VALIDATION  = Path("/home/<user>/elmfire_validation/")
+LANDFIRE_EMAIL   = "you@example.com"   # must be registered with LFPS
+WINDNINJA_SOURCE = "install"           # or "farsite"
+```
+
+---
+
+## Input data requirements
+
+The pipeline requires the following external datasets.  Download them once and
+place them at the paths configured in `pipelineConfig.py`.
+
+### MTBS burn perimeters
+
+- **Source**: [MTBS Data Access](https://www.mtbs.gov/direct-download)
+- **File**: `mtbs_perims_DD.shp` (national perimeter shapefile)
+- **Place at**: `pipelineConfig.MTBS_PERIMS_RAW`
+  (default `Data/Perimeters/mtbs_perims_DD.shp`)
+
+### USFS fire occurrence points
+
+- **Source**: USFS ArcGIS Feature Service — download as GeoJSON:
+  `National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson`
+- **Place at**: `pipelineConfig.USFS_POINTS_RAW`
+  (default `Data/National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson`)
+
+### VIIRS / MODIS satellite hotspot detections
+
+- **Source**: NASA FIRMS archive — download the VIIRS/MODIS active fire
+  detections for the US and convert to a GeoPackage named `clipped.gpkg`
+  with layer `output`.  Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM
+  string), plus geometry.
+- **Place at**: `pipelineConfig.SATELLITE_GPKG`
+  (default `Data/satellites/clipped.gpkg`)
+
+### OSM road and waterway barriers
+
+Pre-processed OpenStreetMap extracts in GeoPackage format:
+
+| File | Contents | Config key |
+|------|----------|------------|
+| `Barriers/us_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
+| `Barriers/waterways.gpkg` | OSM waterways (layer `lines`, field `waterway`) | `WATER_GPKG` |
+| `Barriers/us_rivers.shp` | Backup river shapefile for areas with poor OSM coverage | `BACKUP_WATER_SHP` |
+
+These can be extracted from a US OSM `.pbf` file using `osmium` + `ogr2ogr`,
+or downloaded from [GeoFabrik](https://download.geofabrik.de/).
+
+### LANDFIRE (downloaded automatically)
+
+LANDFIRE terrain and fuel rasters are downloaded automatically per case via the
+USGS LFPS API during step 1 of the simulation pipeline.  No manual download is
+required — only a valid `LANDFIRE_EMAIL` registered at
+[USGS LFPS](https://lfps.usgs.gov) is needed.
+
+### Summary of required files before first run
+
+```
+Data/
+├── Perimeters/
+│   └── mtbs_perims_DD.shp   (+ .dbf, .prj, .shx)
+├── satellites/
+│   └── clipped.gpkg
+├── Barriers/
+│   ├── us_roads.gpkg
+│   ├── waterways.gpkg
+│   └── us_rivers.shp        (+ .dbf, .prj, .shx)
+├── FB/                       (FARSITE SDK)
+│   └── bin/TestFARSITE.exe
+├── nelson_csharp/            (built from source — see WSL setup above)
+└── National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson
+```
 
 ---
 
@@ -66,35 +280,59 @@ Data/
 
 ### 1. Configure `pipelineConfig.py`
 
-Edit the **User-modifiable parameters** and **Paths** sections at the top of
-`pipelineConfig.py`.  The most important settings are:
+Edit the **User-modifiable parameters** and **Paths** sections:
 
 ```python
-# Paths (section 2)
+# Paths
 BASE_VALIDATION      = Path("/your/network/share/autoValidate/")
 FIRE_ROOT            = Path("/scratch/yourname/FirePairs")
+FARSITE_FB_DIR       = Path("/path/to/FB")        # FARSITE SDK root
 
-# User parameters (section 1)
+# User parameters
 MIN_FIRE_YEAR        = 2023
 MAX_FIRE_YEAR        = 2025
 LANDFIRE_EMAIL       = "you@example.com"
-MAX_WORKERS          = 12
+MAX_PARALLEL_CASES   = 12
 
-# Elmfire (section 10)
+# Wind source: "install" = WindNinja, "farsite" = derive winds from FARSITE output
+WINDNINJA_SOURCE     = "install"
+
+# ELMFIRE
 ELMFIRE_PATH_TO_GDAL = "/path/to/your/conda/envs/elmfire/bin/"
 ```
 
-Everything else (column names, file names, API URLs, simulation parameters)
-is already set to sensible defaults and normally does not need to change.
-
-### 2. Run the local setup (once per batch)
+### 2. Run the full pipeline
 
 ```bash
-python setupPipeline.py
+# Full pipeline from scratch:
+python run_validation.py
+
+# Skip clean + setup (case folders already prepared):
+python run_validation.py --phases run pdf
+
+# Regenerate PDF only:
+python run_validation.py --phases pdf
+
+# Clean outputs then re-run (keep existing case folders):
+python run_validation.py --phases clean run pdf
+
+# Parallel run, skip cases that already have ELMFIRE outputs:
+python run_validation.py --phases run pdf --workers 8 --skip-done
+
+# Process specific cases only:
+python run_validation.py --phases run pdf --cases 00001 00005 00008
 ```
 
-This runs five sequential steps and writes numbered case folders under
-`FIRE_ROOT_LOGIN_NODE`:
+See `python run_validation.py --help` for all options.
+
+---
+
+## Pipeline phases
+
+### Phase: setup
+
+Runs the one-time case-preparation pipeline.  Only needed when starting fresh
+or changing case-selection parameters (year range, area threshold, etc.).
 
 | Step | Script | Output |
 |------|--------|--------|
@@ -104,189 +342,167 @@ This runs five sequential steps and writes numbered case folders under
 | 4 | `eraseInvalidCases.py` | removes cases shorter than `MIN_HOURS_DURATION` h |
 | 5 | `write_metadata_from_summary` | `case_metadata.json` in each folder |
 
-To start fresh (delete all generated output before re-running):
+Use `--setup-clean` to delete all generated files first (full reset).
 
-```bash
-python setupPipeline.py --clean
+### Phase: run
+
+Executes the per-case simulation pipeline in parallel using
+`ProcessPoolExecutor`.  Step order depends on `WINDNINJA_SOURCE`:
+
+#### `WINDNINJA_SOURCE = "install"` (default)
+
+```
+Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
+Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
+Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
+Step 4   downloadWeatherData            →  inputs/weather.wxs
+Step 5   downloadAndRunWindninja        →  inputs/{ws,wd}.tif  (WindNinja)
+Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
+Step 7   getBarrierFile                 →  inputs/barrier.tif
+Step 8   createElmfireInputFiles        →  <case>.data
+Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
+Step 10  runElmfireCase                 →  outputs/time_of_arrival_*.tif
+Step 11  runFarsiteCase                 →  farsite/outputs/farsite_Arrival Time.tif
 ```
 
-### 3. Copy case folders to HPC scratch
+#### `WINDNINJA_SOURCE = "farsite"`
 
-```bash
-rsync -av $FIRE_ROOT_LOGIN_NODE/ $FIRE_ROOT/
+```
+Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
+Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
+Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
+Step 4   downloadWeatherData            →  inputs/weather.wxs
+Step 5   (WindNinja skipped)
+Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
+Step 7   getBarrierFile                 →  inputs/barrier.tif
+Step 8   createElmfireInputFiles        →  <case>.data
+Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
+Step 10  runFarsiteCase                 →  farsite/outputs/farsite_Arrival Time.tif
+                                            farsite/outputs/farsite_WindGrids.tif
+Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE wind grids)
+                                            deletes farsite_WindGrids.tif after extraction
+Step 12  runElmfireCase                 →  outputs/time_of_arrival_*.tif
 ```
 
-### 4. Run the HPC pipeline
+### Phase: pdf
 
-**Single case (useful for testing):**
+Generates `validation.pdf` in `FIRE_ROOT`.  The report contains one page per
+case plus four summary pages:
+
+| Page | Content |
+|------|---------|
+| Per-case | Burn-mask map, area-evolution curves, metrics table |
+| Summary 1 | Similarity scores vs. average wind speed |
+| Summary 2 | Similarity scores vs. burn area and fire duration (log x) |
+| Summary 3 | Area estimation bias per case (asymmetric log₂ bar chart) |
+| Summary 4 | Similarity score distribution histograms |
+
+### Phase: clean
+
+Deletes per-case simulation outputs so cases can be re-run.  Preserves
+`LANDFIRE.tif`, `case_metadata.json`, and fire geometry files.
+
 ```bash
-python runPipelineParallel.py /scratch/nick/FirePairs/00001
+# Clean from landfire_bands step onwards (default):
+python run_validation.py --phases clean
+
+# Clean only ELMFIRE outputs, keep everything else:
+python run_validation.py --phases clean --clean-from elmfire_outputs
+
+# Also delete ws.tif / wd.tif:
+python run_validation.py --phases clean --include-wind-tifs
+
+# Preview what would be deleted without doing it:
+python run_validation.py --phases clean --dry-run
 ```
 
-**All cases under FIRE_ROOT:**
-```bash
-python runPipelineParallel.py
-# or explicitly:
-python runPipelineParallel.py --case-root /scratch/nick/FirePairs
-```
-
-Each case writes a `pipeline.log` file inside the case directory.
-
-**SLURM array (recommended for large batches):**
-The `run_full_pipeline.sh` bash script generates and submits a SLURM array
-job that runs each case as an independent task.
+Available `--clean-from` values:
+`landfire_bands`, `phi_adj`, `weather`, `windninja`, `nelson`, `barrier`,
+`elmfire_inputs`, `elmfire_outputs`
 
 ---
 
-## Per-case pipeline steps
+## FARSITE execution (Wine / WSL)
 
-Each case directory is processed sequentially through nine steps.
+FARSITE runs as a Windows executable (`TestFARSITE.exe`) via Wine on Linux/WSL.
+`runFarsiteCase.py` handles path translation (`/home/…` → `Z:\home\…`),
+sets the required GDAL/PROJ environment variables, and verifies the sentinel
+output (`farsite_Arrival Time.tif`) after the run.
 
-```
-case_dir/
- │
- ├─ 1. getLandfireProductsForFireSim  →  LANDFIRE.tif
- ├─ 2. splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
- ├─ 3. makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
- ├─ 4. downloadWeatherData            →  inputs/weather.wxs
- ├─ 5. downloadAndRunWindninja        →  inputs/{ws,wd}.tif
- ├─ 6. applyNelsonModel               →  inputs/{m1,m10,m100}.tif
- ├─ 7. getBarrierFile                 →  inputs/barrier.tif
- ├─ 8. createElmfireInputFiles        →  <folder_name>.data
- └─ 9. runElmfireCase                 →  outputs/time_of_arrival_*.tif
-```
-
-### Step 1 – LANDFIRE download
-
-Submits a job to the USGS LANDFIRE Product Service (LFPS) API and polls for
-completion.  The job downloads terrain (DEM, slope, aspect) and fuel/canopy
-layers for the fire year.  The correct LANDFIRE dataset version (2019–2025)
-is chosen automatically based on `perim_ignition` year.
-
-Key config: `LANDFIRE_EMAIL`, `EXPAND`, `LFPS_POLL_MAX_TRIES`, `LFPS_POLL_SLEEP_S`.
-
-### Step 2 – Band splitting
-
-Opens the multi-band `LANDFIRE.tif` and writes one single-band GeoTIFF per
-layer.  Band order is fixed by the LFPS `Layer_List` and mirrors
-`LANDFIRE_BAND_FILE_NAMES` in `pipelineConfig`.
-
-### Step 3 – Adjacency / phi rasters
-
-Creates two all-ones float32 rasters matching the DEM footprint.  These are
-required static inputs for Elmfire.
-
-### Step 4 – ERA5 weather
-
-Fetches hourly ERA5 data from the OpenMeteo archive API for the period
-`[SatelliteIgnitionTime − CONDITIONING_DAYS, SatelliteEndTime]` and writes
-a RAWS-format `.wxs` file.
-
-Key config: `CONDITIONING_DAYS`, `OPENMETEO_URL`, `OPENMETEO_MODEL`.
-
-### Step 5 – WindNinja
-
-Runs WindNinja with weather-model initialisation (`PASTCAST-GCP-HRRR-CONUS-3-KM`
-by default).  Fires longer than `WINDNINJA_MAX_WINDOW_DAYS` (13) are
-automatically split into consecutive chunks.  Outputs are converted to
-multi-band GeoTIFFs (one band per hour) by `wn_to_geotiff.py`.
-
-Key config: `WINDNINJA_CONDA_ENV`, `WINDNINJA_WX_MODEL_TYPE`,
-`WINDNINJA_MAX_WINDOW_DAYS`, `WINDNINJA_OUTPUT_HEIGHT`.
-
-### Step 6 – Nelson dead-fuel moisture
-
-Converts input rasters to BSQ format, calls the Nelson C# executable, then
-converts output BSQ files back to compressed GeoTIFFs.  Produces 1-hr, 10-hr,
-and 100-hr fuel moisture rasters.
-
-Key config: `NELSON_EXE`, `CONDITIONING_DAYS`.
-
-### Step 7 – Barrier raster
-
-Rasterises OSM roads and waterways as barrier widths (metres).  Road and water
-class widths are defined in `ROAD_WIDTHS_M` and `WATER_WIDTHS_M`.  A backup
-river shapefile supplements areas with missing OSM waterway coverage.
-
-Key config: `ROADS_GPKG`, `WATER_GPKG`, `BACKUP_WATER_SHP`,
-`BARRIER_BACKUP_WATER_WIDTH_M`.
-
-### Step 8 – Elmfire namelist
-
-Reads DEM, ignition point, and timing metadata to build the Fortran namelist
-(`.data`) file consumed by Elmfire.  The ignition point is snapped to the
-nearest cell with a valid FBFM40 fuel code (≥ 101).
-
-Key config: `ELMFIRE_DT_METEOROLOGY`, `ELMFIRE_DTDUMP`, `ELMFIRE_SIMULATION_DT`,
-`ELMFIRE_LH_MC`, `ELMFIRE_LW_MC`, `ELMFIRE_PATH_TO_GDAL`.
-
-### Step 9 – Elmfire execution
-
-Invokes the `elmfire` executable in the case directory.  Elmfire reads the
-`.data` file and writes time-of-arrival rasters to `outputs/`.
-
-Key config: `ELMFIRE_EXE`.
+After a successful FARSITE run, outputs are cleaned automatically:
+- **`WINDNINJA_SOURCE = "install"`**: keeps only `farsite_Arrival Time.tif`;
+  deletes all other FARSITE outputs including `farsite_WindGrids.tif`.
+- **`WINDNINJA_SOURCE = "farsite"`**: keeps `farsite_Arrival Time.tif` +
+  `farsite_WindGrids.tif` until `farsiteWindToGeotiff.py` has extracted
+  `ws.tif`/`wd.tif`, then deletes `farsite_WindGrids.tif` too.
 
 ---
 
 ## Case folder structure
 
 ```
-<case_dir>/                        e.g. /scratch/nick/FirePairs/00001/
-├── case_metadata.json             all case attributes (times, name, area, …)
-├── firescar.gpkg                  MTBS burn polygon
-├── ignition_point.gpkg            USFS ignition point
-├── satellite_points.gpkg          hotspot points inside the burn polygon
-├── LANDFIRE.tif                   raw multi-band download (deleted after step 2)
-├── 00001.data                     Elmfire namelist
-├── pipeline.log                   stdout/stderr from the full pipeline run
+<case_dir>/                              e.g. FirePairs/00001/
+├── case_metadata.json                   all case attributes (times, name, area, …)
+├── firescar.gpkg                        MTBS burn polygon
+├── ignition_point.gpkg                  USFS ignition point
+├── satellite_points.gpkg                hotspot points inside the burn polygon
+├── LANDFIRE.tif                         raw multi-band download
+├── 00001.data                           ELMFIRE namelist
+├── pipeline.log                         stdout/stderr from the pipeline run
 ├── inputs/
-│   ├── dem.tif                    elevation (m)
-│   ├── slp.tif                    slope (degrees)
-│   ├── asp.tif                    aspect (degrees)
-│   ├── fbfm40.tif                 40-class fuel model
-│   ├── cc.tif                     canopy cover (%)
-│   ├── ch.tif                     canopy height (m)
-│   ├── cbh.tif                    canopy base height (m)
-│   ├── cbd.tif                    canopy bulk density (kg/m³)
-│   ├── adj.tif                    adjacency (all 1s)
-│   ├── phi.tif                    phi (all 1s)
-│   ├── barrier.tif                road/water width raster (m)
-│   ├── weather.wxs                RAWS-format weather file
-│   ├── ws.tif                     wind speed (multi-band, one band/hour)
-│   ├── wd.tif                     wind direction (multi-band, one band/hour)
-│   ├── m1.tif                     1-hr fuel moisture
-│   ├── m10.tif                    10-hr fuel moisture
-│   ├── m100.tif                   100-hr fuel moisture
-│   └── windninja/
-│       ├── chunk_000/, chunk_001/ WindNinja output subdirectories
-│       └── *.asc, *.prj, …        staged ASCII wind outputs
+│   ├── dem.tif                          elevation (m)
+│   ├── slp.tif                          slope (degrees)
+│   ├── asp.tif                          aspect (degrees)
+│   ├── fbfm40.tif                       40-class fuel model
+│   ├── cc.tif                           canopy cover (%)
+│   ├── ch.tif                           canopy height (m)
+│   ├── cbh.tif                          canopy base height (m)
+│   ├── cbd.tif                          canopy bulk density (kg/m³)
+│   ├── adj.tif                          adjacency (all 1s)
+│   ├── phi.tif                          phi (all 1s)
+│   ├── barrier.tif                      road/water width raster (m)
+│   ├── weather.wxs                      RAWS-format weather file
+│   ├── ws.tif                           wind speed  (N bands, one per hour)
+│   ├── wd.tif                           wind direction (N bands, one per hour)
+│   ├── m1.tif                           1-hr fuel moisture
+│   ├── m10.tif                          10-hr fuel moisture
+│   ├── m100.tif                         100-hr fuel moisture
+│   └── windninja/                       WindNinja workspace (deleted after ws/wd built)
+├── farsite/
+│   ├── landscape.lcp                    FARSITE landscape file (converted from LANDFIRE)
+│   ├── farsite.input                    FARSITE control file
+│   ├── farsite_wine.txt                 Wine command-line (auto-generated)
+│   ├── ignition.shp                     reprojected ignition point
+│   ├── barrier.shp                      merged barrier polygons (optional)
+│   └── outputs/
+│       └── farsite_Arrival Time.tif     FARSITE time-of-arrival output (sentinel)
 ├── outputs/
-│   └── time_of_arrival_<HH>.tif   Elmfire TOA rasters
-└── scratch/                        Elmfire working directory
+│   └── time_of_arrival_<HH>.tif         ELMFIRE TOA raster
+└── scratch/                             ELMFIRE working directory
 ```
 
 ---
 
 ## Configuration reference
 
-All settings are documented inline in `pipelineConfig.py`.  The sections are:
+All settings are documented inline in `pipelineConfig.py`.
 
-| Section | Contents |
-|---------|----------|
-| 1. User-modifiable | area threshold, year range, parallelism, email |
-| 2. Paths | network root, HPC scratch, data subdirectories |
+| Section | Key settings |
+|---------|-------------|
+| 1. User-modifiable | `MIN/MAX_FIRE_YEAR`, `MTBS_AREA_THRESHOLD_ACRES`, `MAX_PARALLEL_CASES`, `WINDNINJA_SOURCE` |
+| 2. Paths | `FIRE_ROOT`, `BASE_VALIDATION`, `FARSITE_FB_DIR` |
 | 3. File/dir names | CSV names, shapefile names, subfolder names |
-| 4. Column names | master CSV column keys shared across all scripts |
+| 4. Column names | master CSV column keys shared across scripts |
 | 5. MTBS / USFS | field names in raw input datasets |
 | 6. LANDFIRE | band order, product names, raster naming |
 | 7. Satellite | coverage fraction, gap tolerance, buffer size |
 | 8. Weather | OpenMeteo URL and model |
-| 9. WindNinja | executable, model type, chunk size, output height |
-| 10. Elmfire | exe, GDAL path, simulation parameters, moisture content |
-| 11. Barrier | road/water widths, OSM field names |
-| 12. LFPS API | base URL, product list, poll parameters |
-| 13. Nelson | path to C# executable |
+| 9. WindNinja | exe, model type, chunk size, output height, mesh resolution factor |
+| 10. ELMFIRE | exe, GDAL path, simulation parameters, moisture content |
+| 11. FARSITE | `FARSITE_FB_DIR`, `FARSITE_EXE_NAME` |
+| 12. Barrier | road/water widths, OSM field names |
+| 13. LFPS API | base URL, product list, poll parameters |
+| 14. Nelson | path to C# executable |
 
 ---
 
@@ -294,31 +510,43 @@ All settings are documented inline in `pipelineConfig.py`.  The sections are:
 
 ### LANDFIRE job fails or times out
 - Check that `LANDFIRE_EMAIL` is registered with LFPS.
-- Increase `LFPS_POLL_MAX_TRIES` (default 300 × 10 s = ~50 min).
+- Increase `LFPS_POLL_MAX_TRIES` (default 300 × 10 s ≈ 50 min).
 - The LFPS service can be slow during peak hours; try again later.
 
 ### WindNinja fails
-- Confirm `WINDNINJA_CONDA_ENV` matches the name of the conda environment
-  that has `WindNinja_cli` on its PATH.
+- Confirm `WINDNINJA_CONDA_ENV` matches the conda environment with `WindNinja_cli` on PATH.
 - Check `inputs/windninja/chunk_000/windninja_cli.log` for the error message.
 - Ensure the DEM covers the full fire domain.
 
-### Elmfire fails
-- Confirm `ELMFIRE_EXE` is on PATH (`which elmfire`).
+### FARSITE fails (Wine)
+- Confirm Wine is installed: `wine --version`.
+- Confirm `FARSITE_FB_DIR` points to the SDK root containing `bin/TestFARSITE.exe`.
+- Check `farsite/pipeline.log` for Wine error output.
+- Run `wine TestFARSITE.exe` interactively to test the Wine prefix.
+
+### ELMFIRE fails
+- Confirm `ELMFIRE_EXE` is on PATH: `which elmfire`.
 - Check `ELMFIRE_PATH_TO_GDAL` points to a directory containing `gdal_translate`.
-- The `outputs/` and `scratch/` directories are created automatically before
-  Elmfire runs; if they exist from a prior run, their contents are overwritten.
+- The `outputs/` and `scratch/` directories are created automatically; existing
+  contents are overwritten on re-run.
 
 ### Satellite end time not found
 - Some fires have sparse satellite coverage.  Cases where coverage never
-  reaches 5% of the effective burn area are skipped gracefully.
+  reaches the threshold are skipped gracefully.
 - Adjust `COVERAGE_FRACTION` or `SAT_CHAIN_MAX_GAP_DAYS` in `pipelineConfig`
   to be more lenient.
 
 ### Ignition snapping fails
 - Raised as a `RuntimeError` if no valid FBFM40 pixel (≥ 101) exists within
-  2000 cells of the ignition point.  This usually means the burn perimeter is
+  2000 cells of the ignition point.  Usually means the burn perimeter is
   outside the LANDFIRE domain or the fuel download failed.
+
+### Disk usage is excessive
+- WindNinja creates many `step_NNN/` subdirectories.  These are deleted
+  automatically by `wn_to_geotiff.clean_windninja_outputs()` after `ws.tif`
+  and `wd.tif` are built.  If a run was interrupted mid-step, re-run from the
+  `windninja` step: `python run_validation.py --phases clean run --clean-from windninja`.
+- All GeoTIFF outputs use LZW compression + tiling.
 
 ---
 
@@ -331,11 +559,11 @@ All settings are documented inline in `pipelineConfig.py`.  The sections are:
   to `main()` for single-case testing, or omit it to process all cases under
   `FIRE_ROOT`.
 
-- **`parallel_api.py`** provides the `Tee` class, `make_logger`, `retry_call`,
-  and `run_parallel`.  Import from here instead of reimplementing locally.
+- **`parallel_api.py`** provides `Tee`, `make_logger`, `retry_call`, and
+  `run_subprocess`.  Import from here instead of reimplementing locally.
 
-- **`case_metadata.py`** handles all JSON serialisation / deserialisation of
-  per-case metadata, including datetime normalisation.
+- **`case_metadata.py`** handles all JSON serialisation of per-case metadata,
+  including datetime normalisation.
 
 - Scripts in `serial/` are slower sequential versions kept for debugging.
   Scripts in `old_code/` are obsolete.
