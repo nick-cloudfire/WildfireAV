@@ -15,9 +15,11 @@ Suptitle: fire name, year, case ID
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 import logging
+import os
 import re
 from typing import Any
 
@@ -115,10 +117,11 @@ MODELS: list[ModelConfig] = [
 ROOT_DIR         = Path(r"/home/nick/elmfire_validation/FirePairs")
 OUT_PDF          = ROOT_DIR / "validation_report.pdf"
 
-BURN_THRESHOLD   = 1.0
-ALL_TOUCHED_OBS  = False
-CURVE_MAX_POINTS = 300
-MODEL_CURVE_BINS = 600
+BURN_THRESHOLD        = 1.0
+ALL_TOUCHED_OBS       = False
+CURVE_MAX_POINTS      = 300
+MODEL_CURVE_BINS      = 600
+NON_IGNITION_JACCARD  = 0.01   # cases where max Jaccard < this are treated as non-ignited
 
 FIRESCAR_NAME  = getattr(PC, "BURN_SHAPE_NAME",            "firescar.gpkg")
 IGNITION_NAME  = getattr(PC, "IGNITION_POINT_SHP_NAME",    "ignition_point.gpkg")
@@ -148,6 +151,10 @@ class Case:
     tstop_src:     str | None
 
     obs_true_m2:   float | None             = None
+    avg_wind_kph:  float | None             = None
+    # toa_arrays: label → (float64 toa array in native units, pixel_area_m2)
+    # Cached here to avoid re-opening rasters in _case_page.
+    toa_arrays:    dict[str, tuple[np.ndarray, float]] = field(default_factory=dict)
     discovery_dt:  pd.Timestamp | None      = None
     sat_times:     list[pd.Timestamp]       = field(default_factory=list)
     sat_areas_m2:  list[float]              = field(default_factory=list)
@@ -182,15 +189,79 @@ def _tstop_hours(case_dir: Path) -> tuple[float | None, str | None]:
     return (float(m.group(1)) / 3600.0 if m else None), str(data)
 
 
-def _fire_name_year(case_dir: Path) -> tuple[str | None, int | None]:
+def _fire_name_year(case_dir: Path, meta: dict | None = None) -> tuple[str | None, int | None]:
     try:
-        meta = read_case_metadata(case_dir)
+        if meta is None:
+            meta = read_case_metadata(case_dir)
         name = meta.get("perim_name") or meta.get("point_name")
         raw  = meta.get("perim_ignition")
         year = pd.to_datetime(raw, errors="coerce").year if raw else None
         return (str(name) if name else None), (int(year) if year and not pd.isna(year) else None)
     except Exception:
         return None, None
+
+
+# ---------------------------------------------------------------------------
+# WXS wind helper
+# ---------------------------------------------------------------------------
+
+def _wxs_avg_wind_kph(case_dir: Path, meta: dict | None = None) -> float | None:
+    """Return mean wind speed (kph) from the WXS file over the fire window.
+
+    The fire window is defined by SatelliteIgnitionTime → SatelliteEndTime from
+    case metadata (mirroring the logic in downloadAndRunWindninja_WXS.py).
+    Falls back to the full file average if the window cannot be determined.
+    Pass *meta* (already loaded by the caller) to avoid a redundant file read.
+    """
+    wxs_path = case_dir / PC.INPUTS_SUBDIR_NAME / PC.WXS_FILE_NAME
+    if not wxs_path.exists():
+        return None
+    try:
+        lines = wxs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        header_idx = next(
+            (i for i, ln in enumerate(lines)
+             if ln.strip().startswith("Year") and "WindSpd" in ln),
+            None,
+        )
+        if header_idx is None:
+            return None
+        # Single-pass: collect wind values (and optional timestamps) together
+        timestamps, wind_vals = [], []
+        for ln in lines[header_idx + 1:]:
+            parts = ln.split()
+            if len(parts) < 10:
+                continue
+            wind_vals.append(float(parts[7]))
+            timestamps.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3].zfill(4)))
+        if not wind_vals:
+            return None
+        # Filter to the fire simulation window if metadata available
+        try:
+            if meta is None:
+                meta = read_case_metadata(case_dir)
+            start = pd.to_datetime(meta.get(PC.COL_SATELLITE_IGNITION))
+            end   = pd.to_datetime(meta.get(PC.COL_SATELLITE_END))
+            if pd.notna(start) and pd.notna(end):
+                if getattr(start, "tzinfo", None) is not None:
+                    start = start.tz_convert("UTC").tz_localize(None)
+                if getattr(end, "tzinfo", None) is not None:
+                    end = end.tz_convert("UTC").tz_localize(None)
+                start_h = start.floor("h")
+                stop_h  = (end + pd.Timedelta(hours=1)).floor("h")
+                window = [
+                    w for (yr, mo, dy, hhmm), w in zip(timestamps, wind_vals)
+                    if start_h
+                    <= pd.Timestamp(year=yr, month=mo, day=dy,
+                                    hour=int(hhmm[:2]), minute=int(hhmm[2:]))
+                    <= stop_h
+                ]
+                if window:
+                    return float(sum(window) / len(window))
+        except Exception:
+            pass
+        return float(sum(wind_vals) / len(wind_vals))
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -221,11 +292,26 @@ def _read_ignition(case_dir: Path) -> gpd.GeoDataFrame:
 # Raster helpers
 # ---------------------------------------------------------------------------
 
-def _require_projected(ds: rasterio.io.DatasetReader, label: str) -> None:
-    if ds.crs is None or getattr(ds.crs, "is_geographic", False):
+def _require_projected(ds: rasterio.io.DatasetReader, label: str,
+                       fallback_crs=None):
+    """Return the CRS to use for *ds*.
+
+    If the raster has no embedded CRS and *fallback_crs* is provided (e.g. the
+    base-model CRS), the fallback is returned with a debug log instead of
+    raising — useful for FARSITE outputs that lack CRS metadata but are known
+    to be in the same projected system as the ELMFIRE raster.
+    Raises if the CRS is geographic or missing with no fallback.
+    """
+    if ds.crs is None:
+        if fallback_crs is not None:
+            log.debug("%s: no CRS embedded — assuming base CRS %s", label, fallback_crs)
+            return fallback_crs
+        raise ValueError(f"{label}: CRS is None and no fallback provided.")
+    if getattr(ds.crs, "is_geographic", False):
         raise ValueError(
             f"{label}: CRS is {ds.crs}. Rasters must be in a projected (meter) CRS."
         )
+    return ds.crs
 
 
 def _pixel_area_m2(ds: rasterio.io.DatasetReader) -> float:
@@ -301,11 +387,11 @@ def _model_curve(toa: np.ndarray, threshold: float, px_m2: float, bins: int
     return edges[1:], np.cumsum(counts).astype(np.float64) * px_m2
 
 
-def _reproject_mask(ds_src, ds_dst, mask_u8: np.ndarray) -> np.ndarray:
+def _reproject_mask(ds_src, ds_dst, mask_u8: np.ndarray, src_crs=None) -> np.ndarray:
     dst = np.zeros((ds_dst.height, ds_dst.width), dtype=np.uint8)
     reproject(
         source=mask_u8, destination=dst,
-        src_transform=ds_src.transform, src_crs=ds_src.crs,
+        src_transform=ds_src.transform, src_crs=src_crs or ds_src.crs,
         dst_transform=ds_dst.transform, dst_crs=ds_dst.crs,
         resampling=Resampling.nearest, src_nodata=0, dst_nodata=0,
     )
@@ -530,6 +616,9 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
     base_mc  = next((mc for mc in MODELS if c.model_toas.get(mc.label)), None)
     base_toa = c.model_toas[base_mc.label] if base_mc else None
 
+    plotted_models: list[str] = []   # models whose mask was successfully drawn
+    failed_models:  list[str] = []   # models whose overlay raised an exception
+
     if base_toa:
         with rasterio.open(base_toa) as base_ds:
             _require_projected(base_ds, f"{base_mc.label} TOA")
@@ -545,12 +634,16 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
                         _plot_mask(ax_map, base_ds, mask, mc.rgba)
                     else:
                         with rasterio.open(toa) as ds2:
-                            _require_projected(ds2, f"{mc.label} TOA")
+                            eff_crs = _require_projected(ds2, f"{mc.label} TOA",
+                                                         fallback_crs=base_ds.crs)
                             raw_u8 = _burn_mask(ds2, mc.band, BURN_THRESHOLD).astype(np.uint8)
-                            on_base = _reproject_mask(ds2, base_ds, raw_u8).astype(bool)
+                            on_base = _reproject_mask(ds2, base_ds, raw_u8,
+                                                      src_crs=eff_crs).astype(bool)
                             _plot_mask(ax_map, base_ds, on_base, mc.rgba)
+                    plotted_models.append(mc.label)
                 except Exception as e:
                     log.warning("Case %s: %s map overlay failed: %s", c.case_id, mc.label, e)
+                    failed_models.append(mc.label)
 
             gpd.GeoSeries([c.obs_geom_base], crs=base_ds.crs).plot(
                 ax=ax_map, facecolor="none", edgecolor="black", linewidth=2
@@ -566,6 +659,9 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
             except Exception:
                 pass
 
+    log.info("Case %s map: plotted=%s%s", c.case_id, plotted_models,
+             f"  FAILED={failed_models}" if failed_models else "")
+
     # Map title: Jaccard scores per model
     j_parts = []
     for mc in MODELS:
@@ -574,11 +670,17 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
             j_parts.append(f"J({mc.label})={j:.3f}")
     ax_map.set_title("Burn masks" + ("  |  " + "  ".join(j_parts) if j_parts else ""))
 
-    # Legend
+    # Legend — only list models that were actually drawn; mark failures explicitly
     handles = [Line2D([0], [0], color="black", linewidth=2, label="Observed")]
     for mc in MODELS:
-        if c.model_toas.get(mc.label):
+        if mc.label in plotted_models:
             handles.append(Patch(facecolor=mc.color, alpha=mc.alpha, label=f"{mc.label} burn"))
+        elif mc.label in failed_models:
+            handles.append(Patch(facecolor="none", edgecolor=mc.color, linewidth=1,
+                                 linestyle="--", label=f"{mc.label} (overlay error)"))
+        elif not c.model_toas.get(mc.label):
+            handles.append(Patch(facecolor="none", edgecolor="gray", linewidth=1,
+                                 linestyle=":", label=f"{mc.label} (not found)"))
     if c.ign_base is not None and not c.ign_base.empty:
         handles.append(Line2D([0], [0], marker="x", linestyle="None", markersize=10, label="Ignition"))
     ax_map.legend(handles=handles, loc="upper right", fontsize=8)
@@ -605,13 +707,19 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
 
     xmax = 0.0
     for mc in MODELS:
-        toa_path = c.model_toas.get(mc.label)
-        if not toa_path:
+        if not c.model_toas.get(mc.label):
             continue
         try:
-            with rasterio.open(toa_path) as ds:
-                toa_arr = np.asarray(ds.read(mc.band, masked=True).filled(np.nan), np.float64)
-                t_vals, a_vals = _model_curve(toa_arr, BURN_THRESHOLD, _pixel_area_m2(ds), MODEL_CURVE_BINS)
+            cached = c.toa_arrays.get(mc.label)
+            if cached is not None:
+                toa_arr, px_m2 = cached
+            else:
+                # Fallback: re-open if not cached (shouldn't normally happen).
+                with rasterio.open(c.model_toas[mc.label]) as ds:
+                    toa_arr = np.asarray(ds.read(mc.band, masked=True).filled(np.nan),
+                                         np.float64)
+                    px_m2 = _pixel_area_m2(ds)
+            t_vals, a_vals = _model_curve(toa_arr, BURN_THRESHOLD, px_m2, MODEL_CURVE_BINS)
             if t_vals.size and a_vals.size:
                 xh = t_vals * mc.scale_to_hours
                 xh, yn = _decimate(xh, _norm(a_vals), CURVE_MAX_POINTS)
@@ -680,6 +788,7 @@ def _collect_model_arrays(cases: list[Case]) -> dict[str, dict[str, np.ndarray]]
             (
                 c.obs_true_m2 * M2_TO_ACRES if c.obs_true_m2 else np.nan,
                 c.tstop_h if c.tstop_h is not None else np.nan,
+                c.avg_wind_kph if c.avg_wind_kph is not None else np.nan,
                 float(c.metrics.get(f"{prefix}_jaccard",  np.nan)),
                 float(c.metrics.get(f"{prefix}_sorensen", np.nan)),
                 float(c.metrics.get(f"{prefix}_kappa",    np.nan)),
@@ -689,22 +798,66 @@ def _collect_model_arrays(cases: list[Case]) -> dict[str, dict[str, np.ndarray]]
         if rows:
             arr = np.array(rows, dtype=float)
         else:
-            arr = np.empty((0, 5))
+            arr = np.empty((0, 6))
         out[mc.label] = {
-            "obs_acres": arr[:, 0] if arr.size else np.array([]),
-            "tstop_h":   arr[:, 1] if arr.size else np.array([]),
-            "jaccard":   arr[:, 2] if arr.size else np.array([]),
-            "sorensen":  arr[:, 3] if arr.size else np.array([]),
-            "kappa":     arr[:, 4] if arr.size else np.array([]),
+            "obs_acres":    arr[:, 0] if arr.size else np.array([]),
+            "tstop_h":      arr[:, 1] if arr.size else np.array([]),
+            "avg_wind_kph": arr[:, 2] if arr.size else np.array([]),
+            "jaccard":      arr[:, 3] if arr.size else np.array([]),
+            "sorensen":     arr[:, 4] if arr.size else np.array([]),
+            "kappa":        arr[:, 5] if arr.size else np.array([]),
         }
     return out
+
+
+def _add_bestfit(ax, x: np.ndarray, y: np.ndarray, color, use_log: bool = False,
+                 h_anchor: str = "left", y_pos: float = 0.04) -> None:
+    """Overlay a linear best-fit line and annotate with R² and equation.
+
+    Parameters
+    ----------
+    h_anchor : str
+        Horizontal side for the annotation box: ``"left"`` or ``"right"``.
+    y_pos : float
+        Vertical position (axes fraction, bottom edge) for the annotation box.
+        Pass increasing values to stack multiple model annotations.
+    """
+    if x.size < 3:
+        return
+    x_fit = np.log10(x) if use_log else x
+    try:
+        coeffs = np.polyfit(x_fit, y, 1)
+    except (np.linalg.LinAlgError, ValueError):
+        return
+    slope, intercept = coeffs
+    r2 = np.corrcoef(x_fit, y)[0, 1] ** 2
+
+    x_sorted = np.sort(x)
+    x_fit_sorted = np.log10(x_sorted) if use_log else x_sorted
+    y_line = slope * x_fit_sorted + intercept
+
+    ax.plot(x_sorted, y_line, color=color, linewidth=1.2, linestyle="--",
+            alpha=0.85, zorder=4)
+
+    if use_log:
+        eq_str = f"y={slope:+.3f}·log₁₀(x){intercept:+.3f}"
+    else:
+        eq_str = f"y={slope:+.4f}·x{intercept:+.3f}"
+    label = f"R²={r2:.3f}  {eq_str}"
+
+    x_pos = 0.02 if h_anchor == "left" else 0.98
+    ha    = "left" if h_anchor == "left" else "right"
+    ax.text(x_pos, y_pos, label, transform=ax.transAxes,
+            fontsize=6.5, color=color, ha=ha, va="bottom",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color,
+                      alpha=0.7, linewidth=0.6), zorder=5)
 
 
 def _summary_scatter(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figure:
     """3×2 grid: rows = metrics, cols = [burn size, duration]."""
     x_configs = [
         ("obs_acres", "Observed Burn Area (acres)", True),   # log x
-        ("tstop_h",   "Fire Duration (hours)",      False),
+        ("tstop_h",   "Fire Duration (hours)",      True),   # log x
     ]
 
     fig, axes = plt.subplots(3, 2, figsize=(11.69, 8.27), squeeze=False)
@@ -725,6 +878,10 @@ def _summary_scatter(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figu
             if use_log:
                 ax.set_xscale("log")
 
+            # Stack all fit annotations on the left, one above the other, so
+            # none of them can fall behind the legend which sits at lower right.
+            ANN_STEP = 0.12   # axes-fraction gap between stacked boxes
+            ann_y    = 0.04
             for mc in MODELS:
                 x = model_arrays[mc.label][x_key]
                 y = model_arrays[mc.label][m_key]
@@ -732,6 +889,9 @@ def _summary_scatter(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figu
                 if ok.any():
                     ax.scatter(x[ok], y[ok], color=mc.color, alpha=0.65, s=18,
                                label=f"{mc.label} (n={ok.sum()})", zorder=3)
+                    _add_bestfit(ax, x[ok], y[ok], mc.color, use_log=use_log,
+                                 h_anchor="left", y_pos=ann_y)
+                    ann_y += ANN_STEP
 
             if row == 0 and col == 0:
                 ax.legend(fontsize=7, loc="lower right")
@@ -785,9 +945,315 @@ def _summary_histograms(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.F
     return fig
 
 
+def _summary_wind_scatter(model_arrays: dict[str, dict[str, np.ndarray]]) -> plt.Figure:
+    """Grid of similarity metrics vs. average simulation wind speed, one column per model."""
+    n_metrics = len(_METRICS_INFO)
+    n_models  = len(MODELS)
+
+    fig, axes = plt.subplots(n_metrics, n_models, figsize=(11.69, 8.27), squeeze=False)
+    fig.suptitle("Similarity Scores vs. Average Simulation Wind Speed (kph)",
+                 fontsize=13, fontweight="bold", y=0.99)
+
+    for col, mc in enumerate(MODELS):
+        x = model_arrays[mc.label]["avg_wind_kph"]
+        for row, (m_key, m_label) in enumerate(_METRICS_INFO):
+            ax = axes[row, col]
+            ax.set_ylim(-0.05, 1.05)
+            ax.grid(True, alpha=0.3, linewidth=0.5)
+            if col == 0:
+                ax.set_ylabel(m_label)
+            if row == 0:
+                ax.set_title(mc.label)
+            if row == n_metrics - 1:
+                ax.set_xlabel("Avg Wind Speed (kph)")
+
+            y  = model_arrays[mc.label][m_key]
+            ok = np.isfinite(x) & np.isfinite(y)
+            if ok.any():
+                ax.scatter(x[ok], y[ok], color=mc.color, alpha=0.65, s=18, zorder=3)
+                _add_bestfit(ax, x[ok], y[ok], mc.color)
+                ax.text(0.98, 0.95, f"n={ok.sum()}", transform=ax.transAxes,
+                        ha="right", va="top", fontsize=8)
+            else:
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    return fig
+
+
+def _summary_area_bias(cases: list[Case]) -> plt.Figure:
+    """One subplot per model: horizontal bars of log₂(sim/obs) ratio per case.
+
+    Only the N most extreme over- and under-estimating cases are labelled.
+    All model subplots share the same x-axis limits.
+    """
+    N_LABEL   = 7    # (kept for potential future use)
+
+    n_models  = len(MODELS)
+
+    # ---- first pass: collect data and compute shared x-limits -----------
+    model_data: dict[str, tuple[list[str], np.ndarray]] = {}
+    all_log2: list[float] = []
+
+    for mc in MODELS:
+        prefix = mc.label.lower()
+        rows: list[tuple[str, float]] = []
+        for c in cases:
+            if not c.model_toas.get(mc.label):
+                continue
+            ratio = float(c.metrics.get(f"{prefix}_ratio_of_areas", np.nan))
+            if not np.isfinite(ratio) or ratio <= 0:
+                continue
+            rows.append(((c.fire_name or c.case_id)[:24], ratio))
+        if rows:
+            rows.sort(key=lambda r: r[1])
+            lbls, rats = zip(*rows)
+            log2_vals = np.log2(np.array(rats, dtype=float))
+            model_data[mc.label] = (list(lbls), log2_vals)
+            all_log2.extend(log2_vals.tolist())
+
+    # Shared x-axis: pad 20 % beyond each side independently so the range
+    # reflects how far overestimates and underestimates actually reach.
+    # Always show at least ±log2(4)=2 (i.e. 4× / 1/4×) on both sides.
+    if all_log2:
+        pos_vals  = [v for v in all_log2 if v > 0] or [0.0]
+        neg_vals  = [v for v in all_log2 if v < 0] or [0.0]
+        x_pos_max = max(2.0, max(pos_vals) * 1.20)
+        x_neg_min = min(-2.0, min(neg_vals) * 1.20)
+        shared_xlim = (x_neg_min, x_pos_max)
+    else:
+        shared_xlim = (-3, 3)
+
+    # ---- figure ----------------------------------------------------------
+    fig, axes = plt.subplots(1, n_models, figsize=(11.69, 8.27), squeeze=False)
+    fig.suptitle(
+        "Area Estimation Bias per Case   "
+        "(log₂ scale:  0 = perfect,  +1 = 2× over,  −1 = 2× under)",
+        fontsize=11, fontweight="bold", y=0.99,
+    )
+
+    for col, mc in enumerate(MODELS):
+        ax = axes[0, col]
+
+        if mc.label not in model_data:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=9, color="gray")
+            ax.set_title(mc.label)
+            ax.set_xlim(shared_xlim)
+            continue
+
+        labels, log2_vals = model_data[mc.label]
+        ratios  = 2.0 ** log2_vals
+        n       = len(labels)
+        y_pos   = np.arange(n)
+
+        # ---- bars --------------------------------------------------------
+        over_color  = (*mc.color, 0.75)
+        under_color = (0.50, 0.50, 0.50, 0.65)
+        bar_colors  = [over_color if v >= 0 else under_color for v in log2_vals]
+
+        ax.barh(y_pos, log2_vals, color=bar_colors,
+                edgecolor="none", linewidth=0, height=0.85)
+
+        # ---- reference lines (one per integer log2 step in the range) ------
+        ax.axvline(0, color="black", linewidth=1.0, zorder=5)
+        neg_ref = int(np.ceil(abs(shared_xlim[0])))
+        pos_ref = int(np.ceil(shared_xlim[1]))
+        for k in range(1, max(neg_ref, pos_ref) + 1):
+            for sign in (+1, -1):
+                v = sign * k
+                if shared_xlim[0] <= v <= shared_xlim[1]:
+                    ax.axvline(v, color="gray", linestyle=":",
+                               linewidth=0.7, alpha=0.55, zorder=3)
+
+        ax.set_xlim(shared_xlim)
+        ax.set_xlabel("log₂(simulated / observed area)")
+        ax.set_title(mc.label)
+        ax.grid(True, axis="x", alpha=0.25, linewidth=0.5)
+        ax.tick_params(axis="y", length=0)   # hide tick marks
+
+        # ---- y-tick labels: none (bars are too numerous to label usefully)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels([""] * n)
+
+        # ---- stats box ---------------------------------------------------
+        n_over    = int((log2_vals > 0).sum())
+        med_ratio = float(np.median(ratios))
+        stats_txt = (
+            f"n = {n}\n"
+            f"median ratio = {med_ratio:.2f}×\n"
+            f"overestimate: {n_over}/{n} ({100*n_over/n:.0f}%)"
+        )
+        ax.text(0.98, 0.01, stats_txt, transform=ax.transAxes,
+                fontsize=7, ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                          ec="gray", alpha=0.8, linewidth=0.6))
+
+        # ---- legend ------------------------------------------------------
+        legend_handles = [
+            Patch(color=mc.color, alpha=0.80, label="Overestimate  (ratio > 1)"),
+            Patch(color=(0.50, 0.50, 0.50), alpha=0.75, label="Underestimate  (ratio < 1)"),
+        ]
+        ax.legend(handles=legend_handles, fontsize=7, loc="upper left")
+
+        # ---- x-axis reference tick labels --------------------------------
+        # Build ticks to cover the actual (asymmetric) range: powers of 2 up
+        # to the nearest integer log2 on each side.
+        neg_steps = int(np.ceil(abs(shared_xlim[0])))   # e.g. 3 → 1/2×, 1/4×, 1/8×
+        pos_steps = int(np.ceil(shared_xlim[1]))         # e.g. 2 → 2×, 4×
+        xtick_set: set[int] = {0}
+        for k in range(1, pos_steps + 1):
+            xtick_set.add(k)
+        for k in range(1, neg_steps + 1):
+            xtick_set.add(-k)
+        xticks = sorted(xtick_set)
+        ax.set_xticks(xticks)
+        xlabels = []
+        for v in xticks:
+            if v == 0:
+                xlabels.append("1×")
+            elif v > 0:
+                xlabels.append(f"{2**v:.0f}×")
+            else:
+                xlabels.append(f"1/{2**(-v):.0f}×")
+        ax.set_xticklabels(xlabels, fontsize=9)
+        ax.set_xlabel("simulated / observed area")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig
+
+
 def _summary_pages(cases: list[Case]) -> list[plt.Figure]:
     arrays = _collect_model_arrays(cases)
-    return [_summary_scatter(arrays), _summary_histograms(arrays)]
+    return [
+        _summary_wind_scatter(arrays),
+        _summary_scatter(arrays),
+        _summary_area_bias(cases),
+        _summary_histograms(arrays),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Case classification
+# ---------------------------------------------------------------------------
+
+def _case_status(c: Case) -> str:
+    """Return 'success' or 'non_ignited'.
+
+    A case is non-ignited when every model with results has Jaccard < NON_IGNITION_JACCARD,
+    indicating the simulation burned little or nothing.
+    """
+    jaccards = [
+        float(c.metrics.get(f"{mc.label.lower()}_jaccard", np.nan))
+        for mc in MODELS if c.model_toas.get(mc.label)
+    ]
+    valid = [j for j in jaccards if np.isfinite(j)]
+    if not valid or max(valid) < NON_IGNITION_JACCARD:
+        return "non_ignited"
+    return "success"
+
+
+# ---------------------------------------------------------------------------
+# Cover page
+# ---------------------------------------------------------------------------
+
+def _cover_page(
+    results:     list[tuple],
+    successful:  list[Case],
+    non_ignited: list[Case],
+) -> plt.Figure:
+    n_total   = len(results)
+    n_failed  = sum(1 for _, c, _ in results if c is None)
+    n_non_ign = len(non_ignited)
+    n_success = len(successful)
+
+    fig = plt.figure(figsize=(11.69, 8.27))
+    fig.suptitle("Validation Report — Summary", fontsize=14, fontweight="bold", y=0.99)
+
+    n_cols = max(len(MODELS), 1)
+    gs = fig.add_gridspec(
+        3, n_cols,
+        height_ratios=[0.10, 0.45, 0.45],
+        hspace=0.45, wspace=0.12,
+        left=0.04, right=0.98, top=0.93, bottom=0.02,
+    )
+
+    # ── Stats row ────────────────────────────────────────────────────────────
+    ax_stats = fig.add_subplot(gs[0, :])
+    ax_stats.axis("off")
+    stats_lines = (
+        f"Total cases: {n_total}     "
+        f"Successful: {n_success}     "
+        f"Non-ignited (Jaccard < {NON_IGNITION_JACCARD:.2f}): {n_non_ign}     "
+        f"Failed (no outputs): {n_failed}"
+    )
+    ax_stats.text(0.5, 0.5, stats_lines, ha="center", va="center",
+                  fontsize=10, family="monospace", transform=ax_stats.transAxes,
+                  bbox=dict(boxstyle="round,pad=0.4", facecolor="#e8e8e8", linewidth=0))
+
+    # ── Per-model top / bottom 10 tables ─────────────────────────────────────
+    col_labels = ["Case", "Fire", "Jaccard", "Sørensen", "κ"]
+
+    for col, mc in enumerate(MODELS):
+        prefix = mc.label.lower()
+        scored = sorted(
+            (
+                (c, float(c.metrics.get(f"{prefix}_jaccard", np.nan)))
+                for c in successful
+                if np.isfinite(float(c.metrics.get(f"{prefix}_jaccard", np.nan)))
+            ),
+            key=lambda t: t[1],
+            reverse=True,          # best first
+        )
+
+        subsets = [
+            (scored[:10],               "Top 10 by Jaccard",    False),
+            (list(reversed(scored[-10:])), "Bottom 10 by Jaccard", True),
+        ]
+
+        for row_idx, (subset, title, is_bottom) in enumerate(subsets, start=1):
+            ax = fig.add_subplot(gs[row_idx, col])
+            ax.axis("off")
+            ax.set_title(f"{mc.label} — {title}",
+                         fontsize=9, fontweight="bold", color=mc.color, pad=3)
+
+            if not subset:
+                ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                        fontsize=9, color="gray", transform=ax.transAxes)
+                continue
+
+            rows_data = [
+                [
+                    c.case_id,
+                    (c.fire_name or "")[:16],
+                    f"{c.metrics.get(f'{prefix}_jaccard',  np.nan):.4f}",
+                    f"{c.metrics.get(f'{prefix}_sorensen', np.nan):.4f}",
+                    f"{c.metrics.get(f'{prefix}_kappa',    np.nan):.4f}",
+                ]
+                for c, _ in subset
+            ]
+
+            tbl = ax.table(
+                cellText=rows_data,
+                colLabels=col_labels,
+                loc="center",
+                cellLoc="center",
+                bbox=[0, 0, 1, 1],
+            )
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(7.5)
+
+            hdr_color  = "#b0b0b0"
+            even_color = "#f0f0f0"
+            for j in range(len(col_labels)):
+                tbl[(0, j)].set_facecolor(hdr_color)
+                tbl[(0, j)].set_text_props(fontweight="bold")
+            for i in range(1, len(rows_data) + 1):
+                for j in range(len(col_labels)):
+                    tbl[(i, j)].set_facecolor(even_color if i % 2 == 0 else "white")
+
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +1266,13 @@ def process_case(case_dir: Path) -> Case:
     if not (case_dir / FIRESCAR_NAME).exists():
         raise FileNotFoundError(f"Missing {FIRESCAR_NAME}")
 
-    fire_name, fire_year = _fire_name_year(case_dir)
+    # Load metadata once; share with helpers to avoid redundant reads.
+    try:
+        meta = read_case_metadata(case_dir)
+    except Exception:
+        meta = {}
+
+    fire_name, fire_year = _fire_name_year(case_dir, meta)
     tstop_h, tstop_src   = _tstop_hours(case_dir)
 
     obs_src = _firescar_union(case_dir / FIRESCAR_NAME)
@@ -818,6 +1290,10 @@ def process_case(case_dir: Path) -> Case:
         "case":            case_id,
         "burn_threshold":  BURN_THRESHOLD,
     }
+
+    # toa_arrays: cache raw float64 arrays and pixel areas to avoid re-opening
+    # rasters in _case_page for the area-evolution curves.
+    toa_arrays: dict[str, tuple[np.ndarray, float]] = {}
 
     with rasterio.open(model_toas[base_mc.label]) as base_ds:
         _require_projected(base_ds, f"{base_mc.label} TOA")
@@ -839,7 +1315,7 @@ def process_case(case_dir: Path) -> Case:
             gpd.GeoSeries([obs_geom_base], crs=base_ds.crs).to_crs(AREA_CRS).iloc[0].area
         )
 
-        # Metrics for each model
+        # Metrics for each model; also cache the TOA array for curve rendering.
         for mc in MODELS:
             toa = model_toas.get(mc.label)
             if not toa:
@@ -847,22 +1323,35 @@ def process_case(case_dir: Path) -> Case:
             try:
                 prefix = mc.label.lower()
                 if toa == model_toas[base_mc.label]:
-                    sim_mask = _burn_mask(base_ds, mc.band, BURN_THRESHOLD)
+                    raw = np.asarray(base_ds.read(mc.band, masked=True).filled(np.nan),
+                                     dtype=np.float64)
+                    px_m2 = _pixel_area_m2(base_ds)
+                    toa_arrays[mc.label] = (raw, px_m2)
+                    sim_mask  = np.isfinite(raw) & (raw >= BURN_THRESHOLD)
                     obs_mask_ = _obs_mask(base_ds, obs_geom_base)
-                    metrics.update(_raster_metrics(obs_mask_, sim_mask, _pixel_area_m2(base_ds), prefix))
+                    metrics.update(_raster_metrics(obs_mask_, sim_mask, px_m2, prefix))
                 else:
                     with rasterio.open(toa) as ds2:
-                        _require_projected(ds2, f"{mc.label} TOA")
-                        obs_geom2 = obs_src.to_crs(ds2.crs).iloc[0]
+                        eff_crs = _require_projected(ds2, f"{mc.label} TOA",
+                                                     fallback_crs=base_ds.crs)
+                        obs_geom2 = obs_src.to_crs(eff_crs).iloc[0]
                         try:
                             obs_geom2 = obs_geom2.buffer(0)
                         except Exception:
                             pass
-                        sim_mask  = _burn_mask(ds2, mc.band, BURN_THRESHOLD)
+                        raw   = np.asarray(ds2.read(mc.band, masked=True).filled(np.nan),
+                                           dtype=np.float64)
+                        px_m2 = _pixel_area_m2(ds2)
+                        toa_arrays[mc.label] = (raw, px_m2)
+                        sim_mask  = np.isfinite(raw) & (raw >= BURN_THRESHOLD)
                         obs_mask_ = _obs_mask(ds2, obs_geom2)
-                        metrics.update(_raster_metrics(obs_mask_, sim_mask, _pixel_area_m2(ds2), prefix))
+                        metrics.update(_raster_metrics(obs_mask_, sim_mask, px_m2, prefix))
             except Exception as e:
                 log.warning("Case %s: %s metrics failed: %s", case_id, mc.label, e)
+
+    avg_wind = _wxs_avg_wind_kph(case_dir, meta)
+    if avg_wind is not None:
+        metrics["avg_wind_kph"] = avg_wind
 
     c = Case(
         case_id       = case_id,
@@ -874,6 +1363,8 @@ def process_case(case_dir: Path) -> Case:
         tstop_h       = tstop_h,
         tstop_src     = tstop_src,
         obs_true_m2   = obs_true_m2,
+        avg_wind_kph  = avg_wind,
+        toa_arrays    = toa_arrays,
         metrics       = metrics,
     )
 
@@ -912,28 +1403,55 @@ def main() -> None:
 
     OUT_PDF.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pass 1: process all cases (no figures yet — we need all results before
-    # writing summary pages)
-    log.info("Processing %d cases …", len(case_dirs_list))
-    results: list[tuple[Path, Case | None, Exception | None]] = []
-    for d in case_dirs_list:
-        try:
-            c = process_case(d)
-            results.append((d, c, None))
-            log.info("OK  %s  (%s %s)  sat_pts=%d",
-                     d.name, c.fire_name or "—", c.fire_year or "—", len(c.sat_times))
-        except Exception as e:
-            log.warning("FAIL %s: %s", d.name, e)
-            results.append((d, None, e))
+    # Pass 1: process all cases in parallel (no figures yet — we need all
+    # results before writing summary pages).
+    n_workers = min(16, os.cpu_count() or 4)
+    log.info("Processing %d cases with %d workers …", len(case_dirs_list), n_workers)
+    result_map: dict[Path, tuple[Case | None, Exception | None]] = {}
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        future_to_dir = {pool.submit(process_case, d): d for d in case_dirs_list}
+        for future in as_completed(future_to_dir):
+            d = future_to_dir[future]
+            try:
+                c = future.result()
+                result_map[d] = (c, None)
+                found = [mc.label for mc in MODELS if c.model_toas.get(mc.label)]
+                missing = [mc.label for mc in MODELS if not c.model_toas.get(mc.label)]
+                log.info(
+                    "OK  %s  (%s %s)  models=[%s]%s  sat_pts=%d",
+                    d.name, c.fire_name or "—", c.fire_year or "—",
+                    ", ".join(found),
+                    f"  missing=[{', '.join(missing)}]" if missing else "",
+                    len(c.sat_times),
+                )
+            except Exception as e:
+                log.warning("FAIL %s: %s", d.name, e)
+                result_map[d] = (None, e)
+    # Restore original sorted order for deterministic PDF output.
+    results: list[tuple[Path, Case | None, Exception | None]] = [
+        (d, *result_map[d]) for d in case_dirs_list
+    ]
 
-    good_cases = [c for _, c, _ in results if c is not None]
-    log.info("%d / %d cases OK", len(good_cases), len(results))
+    good_cases  = [c for _, c, _ in results if c is not None]
+    successful  = [c for c in good_cases if _case_status(c) == "success"]
+    non_ignited = [c for c in good_cases if _case_status(c) == "non_ignited"]
+    n_failed    = len(results) - len(good_cases)
+    log.info(
+        "%d / %d cases OK  —  %d successful, %d non-ignited, %d failed",
+        len(good_cases), len(results), len(successful), len(non_ignited), n_failed,
+    )
 
-    # Pass 2: write PDF — summary pages first, then per-case pages
+    # Pass 2: write PDF
+    #   page 1        : cover (counts + top/bottom 10 tables)
+    #   pages 2–4     : summary scatter / histograms (successful cases only)
+    #   pages 5+      : per-case pages (all cases)
     rows: list[dict[str, Any]] = []
     with PdfPages(OUT_PDF) as pdf:
-        if good_cases:
-            for fig in _summary_pages(good_cases):
+        pdf.savefig(_cover_page(results, successful, non_ignited))
+        plt.close("all")
+
+        if successful:
+            for fig in _summary_pages(successful):
                 pdf.savefig(fig)
                 plt.close(fig)
 
@@ -945,7 +1463,8 @@ def main() -> None:
                 pdf.savefig(_error_page(d.name, str(err)))
             plt.close("all")
 
-    log.info("Wrote %s  (%d pages total)", OUT_PDF, 2 + len(results))
+    n_summary = 4 if successful else 0
+    log.info("Wrote %s  (%d pages total)", OUT_PDF, 1 + n_summary + len(results))
     # pd.DataFrame(rows).to_csv(OUT_PDF.with_suffix(".csv"), index=False)
 
 

@@ -263,9 +263,9 @@ def process_one_folder(folder: Path) -> bool:
         )
 
     # Temporary clip paths
-    tmp_roads   = inputs_dir / "tmp_roads_clip.gpkg"
-    tmp_water   = inputs_dir / "tmp_waterways_clip.gpkg"
-    tmp_backup  = inputs_dir / "tmp_backup_rivers_clip.gpkg"
+    tmp_roads   = inputs_dir / cfg.BARRIER_ROADS_CLIP_NAME
+    tmp_water   = inputs_dir / cfg.BARRIER_WATER_CLIP_NAME
+    tmp_backup  = inputs_dir / cfg.BARRIER_BACKUP_CLIP_NAME
 
     roads_src  = str(ROADS_GPKG)
     roads_lyr  = ROADS_LAYER

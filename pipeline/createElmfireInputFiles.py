@@ -227,6 +227,7 @@ def _build_namelist(
     lines.append(f"LH_MOISTURE_CONTENT            = {LH_MC:.1f}")
     lines.append(f"LW_MOISTURE_CONTENT            = {LW_MC:.1f}")
     lines.append("USE_BARRIERS = .TRUE.")
+    lines.append("WS_AT_10M = .TRUE.")
     lines.append(f"BARRIER_FILENAME               = '{BARRIER_STEM}'")
     lines.append("/\n")
 

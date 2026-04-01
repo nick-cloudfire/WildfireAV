@@ -29,15 +29,17 @@ from pathlib import Path
 # 1. USER-MODIFIABLE PARAMETERS
 # =============================================================================
 
-MTBS_AREA_THRESHOLD_ACRES   = 5000      # minimum burn area to include (acres)
-MIN_FIRE_YEAR               = 2022      # earliest fire year to process
+MTBS_AREA_THRESHOLD_ACRES   = 1000      # minimum burn area to include (acres)
+MIN_FIRE_YEAR               = 2023      # earliest fire year to process
 MAX_FIRE_YEAR               = 2025      # latest  fire year to process
 DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
-EXPAND                      = 0.8       # fractional bbox expansion for LANDFIRE download
+EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE download
 LANDFIRE_EMAIL              = "nick@cloudfire.com"  # LFPS job notification e-mail
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
+SETUP_PIPELINE_MAX_WORKERS  = 8         # parallel workers for getSatelliteEndTimes
 MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
+WINDNINJA_SOURCE            = "farsite"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
 
 # =============================================================================
 # 2. PATHS
@@ -50,6 +52,8 @@ FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FireP
 PERIMETER_DATA_ROOT     = BASE_DATA / "Perimeters"
 SATELLITES_ROOT         = BASE_DATA / "satellites"
 BIN_ROOT                = BASE_DATA / "bin"
+FARSITE_FB_DIR          = BASE_DATA / "FB"          # root of the FireBehavior SDK folder
+FARSITE_EXE_NAME        = "TestFARSITE.exe"         # executable name inside FB/bin/
 
 # =============================================================================
 # 3. FILE / DIRECTORY NAMES
@@ -207,6 +211,10 @@ ALL_TOUCHED         = True
 
 BARRIER_BACKUP_WATER_WIDTH_M = 5.0   # default width for backup river features (m)
 BARRIER_BACKUP_MATCH_TOL_M   = 1.0   # tolerance to consider primary/backup as overlapping (m)
+
+BARRIER_ROADS_CLIP_NAME   = "tmp_roads_clip.gpkg"
+BARRIER_WATER_CLIP_NAME   = "tmp_waterways_clip.gpkg"
+BARRIER_BACKUP_CLIP_NAME  = "tmp_backup_rivers_clip.gpkg"
 
 ROAD_WIDTHS_M = {
     "motorway":    30.0,

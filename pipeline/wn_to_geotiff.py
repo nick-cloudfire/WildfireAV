@@ -146,7 +146,10 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
             transform.f + missing_rows * cellsize,   # shift ymax north
         )
 
-    profile.update(height=target_h, width=target_w, transform=transform)
+    profile.update(
+        height=target_h, width=target_w, transform=transform,
+        compress="lzw", tiled=True, bigtiff="IF_SAFER",
+    )
     with rasterio.open(stack_tif, "w", **profile) as dst:
         dst.write(data)
 
@@ -157,16 +160,25 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
 
 
 def clean_windninja_outputs(in_dir: Path):
-    count = 0
-    wxfolder = [p for p in in_dir.rglob("WXSTATIONS*") if p.is_dir()]
-    for folder in wxfolder:
-        shutil.rmtree(folder)
-    for ext in ("*.asc", "*.prj"):
-        for p in in_dir.rglob(ext):
-            if p.is_file():
-                p.unlink()
-                count += 1
-    print(f"Deleted {count} WindNinja output files (*.asc, *.prj)")
+    """Delete all per-step subdirectories and staged ASCII outputs.
+
+    WindNinja writes one ``step_NNN/`` directory per hourly run and stages a
+    copy of each output back to *in_dir*.  After ws.tif / wd.tif have been
+    built we no longer need any of this — delete everything except the two
+    GeoTIFFs that live in the parent ``inputs/`` folder (not inside in_dir).
+    """
+    in_dir = Path(in_dir)
+    n_dirs = n_files = 0
+
+    for child in list(in_dir.iterdir()):
+        if child.is_dir():
+            shutil.rmtree(child)
+            n_dirs += 1
+        elif child.is_file():
+            child.unlink()
+            n_files += 1
+
+    print(f"  Cleaned windninja/: removed {n_dirs} subdirectories, {n_files} files")
 
 def main(in_dir, out_dir, reference_tif=None, clean=False):
     in_dir  = Path(in_dir)

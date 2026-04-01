@@ -53,7 +53,10 @@ def process_folder(folder: Path) -> None:
             )
 
         base_profile = src.profile.copy()
-        base_profile.update(count=1, driver="GTiff")
+        base_profile.update(
+            count=1, driver="GTiff",
+            compress="lzw", tiled=True, bigtiff="IF_SAFER",
+        )
 
         for band_idx, name in enumerate(BAND_FILE_NAMES, start=1):
             if band_idx > band_count:

@@ -10,7 +10,7 @@ folder before wn_to_geotiff converts them to multi-band GeoTIFFs.
 
 Outputs per case (inside inputs/windninja/)
 -------------------------------------------
-- ws.tif   – wind speed  (one band per hour, m/s)
+- ws.tif   – wind speed  (one band per hour, mph)
 - wd.tif   – wind direction (one band per hour, degrees)
 """
 
@@ -106,7 +106,9 @@ def _read_wxs(wxs_path: pathlib.Path) -> pd.DataFrame:
 def _wxs_window(wxs_df: pd.DataFrame,
                 start: dt.datetime,
                 stop: dt.datetime) -> pd.DataFrame:
-    window = wxs_df.loc[(wxs_df.index >= start) & (wxs_df.index <= stop)].copy()
+    start_hour = start.replace(minute=0, second=0, microsecond=0)
+    stop_hour  = (stop + dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    window = wxs_df.loc[(wxs_df.index >= start_hour) & (wxs_df.index <= stop_hour)].copy()
     if window.empty:
         raise ValueError(f"No wxs records overlap {start} .. {stop}")
     return window
@@ -171,6 +173,7 @@ def _build_cfg(
 
     output_path = {output_path.resolve()}
 
+    output_speed_units       = mph
     output_wind_height       = {OUTPUT_HEIGHT}
     units_output_wind_height = {OUTPUT_HEIGHT_UNITS}
 
@@ -279,7 +282,7 @@ def _run_case(case_folder: pathlib.Path) -> None:
         print(f"  DEM not found at {landscape_path}, skipping.")
         return
 
-    ws_tif = case_folder / INPUTS / WINDNINJA_SUBDIR / cfg.WS_TIF_NAME
+    ws_tif = case_folder / INPUTS / cfg.WS_TIF_NAME
     if ws_tif.exists():
         print(f"  Skipped — ws.tif already exists.")
         return

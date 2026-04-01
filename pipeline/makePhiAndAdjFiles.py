@@ -35,7 +35,10 @@ def _create_for_folder(folder: Path) -> None:
     with rasterio.open(dem_path) as src:
         profile = src.profile.copy()
 
-    profile.update(dtype=DTYPE, count=1, nodata=NODATA)
+    profile.update(
+        dtype=DTYPE, count=1, nodata=NODATA,
+        compress="lzw", tiled=True, bigtiff="IF_SAFER",
+    )
     ones = np.ones((profile["height"], profile["width"]), dtype=DTYPE)
 
     for name in (ADJ_NAME, PHI_NAME):

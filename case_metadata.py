@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 from datetime import date, datetime
@@ -95,7 +96,11 @@ def summary_row_to_metadata(row: pd.Series) -> Dict[str, Any]:
     return {k: _normalise_scalar(v) for k, v in data.items()}
 
 
-def write_metadata_from_summary(summary_csv: Path, case_root: Optional[Path] = None) -> int:
+def write_metadata_from_summary(
+    summary_csv: Path,
+    case_root: Optional[Path] = None,
+    max_workers: int = cfg.SETUP_PIPELINE_MAX_WORKERS,
+) -> int:
     summary_csv = Path(summary_csv)
     case_root = Path(case_root or cfg.FIRE_ROOT_LOGIN_NODE)
     if not summary_csv.exists():
@@ -103,12 +108,19 @@ def write_metadata_from_summary(summary_csv: Path, case_root: Optional[Path] = N
     df = pd.read_csv(summary_csv)
     if cfg.COL_FOLDER not in df.columns:
         raise KeyError(f"Missing '{cfg.COL_FOLDER}' column in {summary_csv}")
-    count = 0
-    for _, row in df.iterrows():
-        meta = summary_row_to_metadata(row)
-        case_dir = case_root / meta[cfg.COL_FOLDER]
-        if not case_dir.exists():
-            continue
+
+    tasks = [
+        (case_root / summary_row_to_metadata(row)[cfg.COL_FOLDER],
+         summary_row_to_metadata(row))
+        for _, row in df.iterrows()
+    ]
+    tasks = [(d, m) for d, m in tasks if d.exists()]
+
+    def _write(args: tuple[Path, Dict[str, Any]]) -> None:
+        case_dir, meta = args
         write_case_metadata(case_dir, meta)
-        count += 1
-    return count
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        list(ex.map(_write, tasks))
+
+    return len(tasks)

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import requests
 import numpy as np
 import pandas as pd
 import rasterio
@@ -94,6 +95,11 @@ def _fetch_hourly(task: WeatherTask) -> tuple[pd.DatetimeIndex, dict]:
 
     def _do():
         r = s.get(OPENMETEO_URL, params=params, timeout=60)
+        if r.status_code == 429:
+            # Raise a retryable exception so retry_call will back off and retry
+            raise requests.RequestException(
+                f"[{task.folder_name}] Rate limited (429) — retrying"
+            )
         if not r.ok:
             raise RuntimeError(
                 f"[{task.folder_name}] OpenMeteo request failed\n"
@@ -108,7 +114,8 @@ def _fetch_hourly(task: WeatherTask) -> tuple[pd.DatetimeIndex, dict]:
             )
         return data
 
-    data = retry_call(_do, tries=4)
+    # Longer backoff for rate limiting: 5s → 10s → 20s → 40s → 60s
+    data = retry_call(_do, tries=6, base_sleep_s=5.0, max_sleep_s=60.0)
     hourly = data["hourly"]
     times = pd.to_datetime(hourly["time"])
     return times, hourly
@@ -128,9 +135,14 @@ def _write_wxs(
         f.write("RAWS_UNITS: METRIC\n")
         f.write("RAWS_WINDS: OpenMeteo_ERA5_center_of_DEM\n")
         f.write("Year Mth Day Time Temp RH HrlyPcp WindSpd WindDir CloudCov\n")
+        # Snap boundaries to hour floors so record count is independent of
+        # the minute component of start/end times.
+        start_hour = start_time.replace(minute=0, second=0, microsecond=0)
+        end_hour   = (end_time + pd.Timedelta(hours=1)).replace(
+                         minute=0, second=0, microsecond=0)
         for _, row in df.iterrows():
             t = pd.to_datetime(row["time"]).to_pydatetime()
-            if not (start_time < t < end_time):
+            if not (start_hour <= t <= end_hour):
                 continue
             time_int  = t.hour * 100 + t.minute
             temp_int  = int(round(float(row["temperature_2m"])))

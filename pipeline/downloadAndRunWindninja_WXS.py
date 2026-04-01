@@ -109,8 +109,10 @@ def _read_wxs(wxs_path: Path) -> pd.DataFrame:
 def _wxs_window(wxs_df: pd.DataFrame,
                 start: dt.datetime,
                 stop: dt.datetime) -> pd.DataFrame:
-    """Return WXS rows that fall within [start, stop]."""
-    window = wxs_df.loc[(wxs_df.index >= start) & (wxs_df.index <= stop)].copy()
+    """Return WXS rows that fall within [start, stop], snapped to hour boundaries."""
+    start_hour = start.replace(minute=0, second=0, microsecond=0)
+    stop_hour  = (stop + dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    window = wxs_df.loc[(wxs_df.index >= start_hour) & (wxs_df.index <= stop_hour)].copy()
     if window.empty:
         raise ValueError(f"No WXS records overlap {start} … {stop}")
     return window
@@ -157,6 +159,7 @@ def _build_cfg(
 
         output_path                = {output_path.resolve()}
 
+        output_speed_units         = mph
         output_wind_height         = {OUTPUT_HEIGHT}
         units_output_wind_height   = {OUTPUT_HEIGHT_UNITS}
 
@@ -268,7 +271,7 @@ def _run_case(case_folder: Path) -> None:
         print(f"  DEM not found at {landscape_path}, skipping.")
         return
 
-    ws_tif = case_folder / INPUTS / WINDNINJA_SUBDIR / cfg.WS_TIF_NAME
+    ws_tif = case_folder / INPUTS / cfg.WS_TIF_NAME
     if ws_tif.exists():
         print("  Skipped — ws.tif already exists.")
         return
@@ -295,7 +298,7 @@ def _run_case(case_folder: Path) -> None:
         return
 
     wxs_df  = _read_wxs(wxs_path)
-    window  = _wxs_window(wxs_df, start_dt.to_pydatetime(), end_dt.to_pydatetime())
+    window  = _wxs_window(wxs_df, start_dt.to_pydatetime(), (end_dt).to_pydatetime())
     n_steps = len(window)
 
     workdir = case_folder / INPUTS / WINDNINJA_SUBDIR

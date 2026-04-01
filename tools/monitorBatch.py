@@ -286,6 +286,10 @@ def _parse_case(case_dir: Path) -> CaseStatus:
     lines = content.splitlines()
     elapsed_s = _elapsed_from_log(log_file, lines)
 
+    # ── DONE via log (fallback when TOA file not yet visible on disk) ─────
+    if any("CASE COMPLETED." in ln for ln in lines[-10:]):
+        return CaseStatus(name, "done", 9, STEP_SHORT[9], "", _done_elapsed(log_file))
+
     # ── Parse current step ─────────────────────────────────────────────────
     step_re = re.compile(r"=== STEP (\d+)/\d+:\s*(\S+)")
     step_num   = 0
@@ -366,7 +370,7 @@ def _render(statuses: list[CaseStatus], interval: int) -> str:
     rows.append(_bar())
 
     for cs in statuses:
-        if cs.status == "pending":
+        if cs.status in ("pending", "done"):
             continue
         fmt       = STATUS_FMT.get(cs.status, dim)
         step_str  = f"{cs.step_num}/9  {cs.step_short}" if cs.step_num else "—"
