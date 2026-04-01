@@ -23,18 +23,19 @@ Sections
 13. Nelson dead-fuel model        – executable path
 """
 
+import os
 from pathlib import Path
 
 # =============================================================================
 # 1. USER-MODIFIABLE PARAMETERS
 # =============================================================================
 
-MTBS_AREA_THRESHOLD_ACRES   = 1000      # minimum burn area to include (acres)
+MTBS_AREA_THRESHOLD_ACRES   = 3000      # minimum burn area to include (acres)
 MIN_FIRE_YEAR               = 2023      # earliest fire year to process
 MAX_FIRE_YEAR               = 2025      # latest  fire year to process
 DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
 EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE download
-LANDFIRE_EMAIL              = "nick@cloudfire.com"  # LFPS job notification e-mail
+LANDFIRE_EMAIL              = os.environ["LFPS_EMAIL"]  # set in shell: export LFPS_EMAIL=you@example.com
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
 SETUP_PIPELINE_MAX_WORKERS  = 8         # parallel workers for getSatelliteEndTimes

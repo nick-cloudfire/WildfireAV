@@ -94,7 +94,7 @@ Data/
 | FARSITE SDK (`TestFARSITE.exe`) | `pipelineConfig.FARSITE_FB_DIR` |
 | Wine (for running FARSITE on Linux/WSL) | on `$PATH` |
 | Nelson C# model | `pipelineConfig.NELSON_EXE` |
-| LFPS API access (USGS email) | `pipelineConfig.LANDFIRE_EMAIL` |
+| LFPS API access (USGS email) | `LFPS_EMAIL` environment variable |
 | OpenMeteo ERA5 (free, no key) | `pipelineConfig.OPENMETEO_URL` |
 
 ---
@@ -155,12 +155,9 @@ ELMFIRE_PATH_TO_GDAL = "/home/<user>/miniconda3/envs/elmfire/bin/"
 
 ### 5. Install WindNinja (optional — only needed for `WINDNINJA_SOURCE="install"`)
 
-```bash
-# WindNinja must be available in a conda environment (default: "base")
-conda activate base
-conda install -c conda-forge windninja -y
-conda activate elmfire
-```
+Follow the instructions in the [WindNinja Github](https://github.com/firelab/windninja/wiki/Building-WindNinja-on-Linux-22.04). 
+Note that the pipeline was setup in Ubuntu-24.04, when asked to run scripts for 22.04, run the provided files for 24.04 instead.
+No need to install the GUI version. 
 
 Set `WINDNINJA_CONDA_ENV` in `pipelineConfig.py` to the environment name that
 has `WindNinja_cli` on its PATH (default `"base"`).
@@ -182,9 +179,20 @@ On first use Wine will initialise its prefix (`.wine/`) automatically.
 No further Wine configuration is needed — the pipeline sets all required
 environment variables (`GDAL_DATA`, `PROJ_LIB`, `WINEDEBUG`) at runtime.
 
-### 7. Install the Nelson dead-fuel moisture model
+### 7. Clone and configure
 
-The Nelson model is a .NET 8 C# project included in `nelson_csharp/`.
+```bash
+cd /home/<user>/elmfire_validation
+git clone https://github.com/nick-cloudfire/autoValidate.git Data
+cd Data
+```
+
+### 8. Install the Nelson dead-fuel moisture model
+
+run the following command to clone the Nelson Dead Fuel Moisture model made for this pipeline,
+based on WUINITY-PREACT Copyright (C) 2025 Jonathan Wahlqvist.
+
+git clone https://github.com/nick-cloudfire/Nelson-Dead-Fuel-Moisture.git <nelson_csharp>
 
 ```bash
 # Install .NET 8 SDK
@@ -194,13 +202,13 @@ sudo apt install -y dotnet-sdk-8.0
 cd /home/<user>/elmfire_validation/Data/nelson_csharp
 dotnet publish -c Release
 ```
-
 The compiled binary path is set automatically by `pipelineConfig.NELSON_EXE`.
 
-### 8. Install FARSITE SDK
+### 9. Download FARSITE Command Line Tools
 
-The FARSITE SDK is not included in this repository.  Obtain
-`TestFARSITE.exe` and its supporting files from Missoula Fire Sciences Lab and
+The FARSITE command line tool is not included in this repository.  Obtain
+`TestFARSITE.exe` and its supporting files from Missoula Fire Sciences Lab 
+in https://www.alturassolutions.com/FB/FB_API.htm and
 place them at the path configured in `pipelineConfig.FARSITE_FB_DIR`.
 The expected layout is:
 
@@ -213,21 +221,21 @@ inputs/FB/
 └── setenv.bat
 ```
 
-### 9. Clone and configure
-
-```bash
-cd /home/<user>/elmfire_validation
-git clone https://github.com/nick-cloudfire/autoValidate.git Data
-cd Data
-```
-
 Edit `pipelineConfig.py` — at minimum update:
 
 ```python
 BASE_VALIDATION  = Path("/home/<user>/elmfire_validation/")
-LANDFIRE_EMAIL   = "you@example.com"   # must be registered with LFPS
 WINDNINJA_SOURCE = "install"           # or "farsite"
 ```
+
+`LANDFIRE_EMAIL` is read from the `LFPS_EMAIL` environment variable (not stored
+in the config file).  Add the following to your `~/.bashrc` (or SLURM job script):
+
+```bash
+export LFPS_EMAIL=you@example.com   # must be registered at https://lfps.usgs.gov
+```
+
+Then reload your shell: `source ~/.bashrc`
 
 ---
 
@@ -243,12 +251,13 @@ All input data lives under `inputs/` and is not version-controlled (listed in
 
 ### USFS fire occurrence points
 
-- **Source**: USFS ArcGIS Feature Service — download as GeoJSON and rename:
+- **Source**: [USFS ArcGIS Feature Service](https://www.fs.usda.gov/rds/archive/catalog/RDS-2013-0009.5) — download as GeoJSON and rename:
 - **Place at**: `inputs/usfs_fire_points.geojson`
 
 ### VIIRS / MODIS satellite hotspot detections
 
-- **Source**: NASA FIRMS archive (VIIRS/MODIS active fire detections for the US)
+- **Source**: [NASA FIRMS archive](https://firms.modaps.eosdis.nasa.gov/download/) (VIIRS/MODIS active fire detections for the US)
+  Login with your email to download the CONUS dataset. 
 - Merge all downloaded shapefiles into a single GeoPackage with layer `output`.
   Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM string), plus geometry.
 - **Place at**: `inputs/satellites/nasa_lance_allSatellites.gpkg`
@@ -268,7 +277,8 @@ Road GeoPackages can be extracted from a US OSM `.pbf` file using
 
 LANDFIRE terrain and fuel rasters are fetched automatically per case via the
 USGS LFPS API (step 1 of the simulation pipeline).  No manual download needed —
-only a valid `LANDFIRE_EMAIL` registered at [USGS LFPS](https://lfps.usgs.gov).
+only a valid email registered at [USGS LFPS](https://lfps.usgs.gov), set via the
+`LFPS_EMAIL` environment variable (see WSL setup step 9).
 
 ### Required layout before first run
 
@@ -306,7 +316,6 @@ FARSITE_FB_DIR       = Path("/path/to/FB")        # FARSITE SDK root
 # User parameters
 MIN_FIRE_YEAR        = 2023
 MAX_FIRE_YEAR        = 2025
-LANDFIRE_EMAIL       = "you@example.com"
 MAX_PARALLEL_CASES   = 12
 
 # Wind source: "install" = WindNinja, "farsite" = derive winds from FARSITE output
@@ -521,7 +530,7 @@ All settings are documented inline in `pipelineConfig.py`.
 ### LANDFIRE job fails or times out
 - The pipeline retries each LANDFIRE download up to 3 times automatically
   (`MAX_RETRIES` in `getLandfireProductsForFireSim.py`).
-- Check that `LANDFIRE_EMAIL` is registered with LFPS.
+- Check that `LFPS_EMAIL` is set in your shell (`echo $LFPS_EMAIL`) and that the address is registered at https://lfps.usgs.gov.
 - Increase `LFPS_POLL_MAX_TRIES` (default 300 × 10 s ≈ 50 min).
 - The LFPS service can be slow during peak hours; try again later.
 
