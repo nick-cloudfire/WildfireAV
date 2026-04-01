@@ -42,6 +42,7 @@ BASE_API        = cfg.LFPS_BASE_API
 TERRAIN_PRODUCTS = list(cfg.LFPS_TERRAIN_PRODUCTS)   # always downloaded
 POLL_SLEEP_S    = cfg.LFPS_POLL_SLEEP_S
 POLL_MAX_TRIES  = cfg.LFPS_POLL_MAX_TRIES
+MAX_RETRIES     = 3     # total attempts per case before giving up
 
 # ---------------------------------------------------------------------------
 # LANDFIRE dataset version tables
@@ -231,27 +232,48 @@ def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
     epsg = _best_utm_crs(expanded).to_epsg()
     log(f"  Output CRS: EPSG:{epsg}")
 
-    log("  Submitting LFPS job …")
-    job_id = _submit_job(products, expanded, epsg)
-    log(f"  Job ID: {job_id}")
-    log(f"  Status URL: {BASE_API}/api/job/status?JobId={job_id}")
-
-    log("  Polling …")
-    status_json = _poll_job(job_id, log=log)
-
-    url = status_json.get("outputFile")
-    if not url:
-        raise RuntimeError("No download URL in LFPS response")
     zip_path = folder / "LANDFIRE.zip"
+    last_exc: BaseException | None = None
 
-    log("  Downloading …")
-    _download_zip(url, zip_path)
+    for attempt in range(1, MAX_RETRIES + 1):
+        if attempt > 1:
+            log(f"  Retry {attempt}/{MAX_RETRIES} after: {last_exc}")
+            # clean up any partial files before retrying
+            zip_path.unlink(missing_ok=True)
+            tmp = folder / "_tmp"
+            if tmp.exists():
+                shutil.rmtree(tmp)
 
-    log("  Unpacking …")
-    _unpack_and_clean(folder, zip_path)
+        try:
+            log(f"  Submitting LFPS job … (attempt {attempt}/{MAX_RETRIES})")
+            job_id = _submit_job(products, expanded, epsg)
+            log(f"  Job ID: {job_id}")
+            log(f"  Status URL: {BASE_API}/api/job/status?JobId={job_id}")
 
-    log("  Done.")
-    return (folder.name, True, "done")
+            log("  Polling …")
+            status_json = _poll_job(job_id, log=log)
+
+            url = status_json.get("outputFile")
+            if not url:
+                raise RuntimeError("No download URL in LFPS response")
+
+            log("  Downloading …")
+            _download_zip(url, zip_path)
+
+            log("  Unpacking …")
+            _unpack_and_clean(folder, zip_path)
+
+            log("  Done.")
+            return (folder.name, True, "done")
+
+        except Exception as exc:
+            last_exc = exc
+            if attempt == MAX_RETRIES:
+                break
+
+    raise RuntimeError(
+        f"LANDFIRE download failed after {MAX_RETRIES} attempts: {last_exc}"
+    ) from last_exc
 
 
 # ---------------------------------------------------------------------------
