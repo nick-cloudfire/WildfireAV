@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+runWildfireAV — single entry point for the ELMFIRE / FARSITE validation pipeline.
+
+Usage
+-----
+  runWildfireAV --start setup    # full reset: clean cases, setup, run, pdf
+  runWildfireAV --start run      # clean sim outputs, run all cases, generate pdf
+  runWildfireAV --start pdf      # regenerate validation pdf only
+
+Options
+-------
+  --start   {setup,run,pdf}   Phase to start from (all later phases also run).
+  --workers N                 Parallel workers for the run phase (default: MAX_PARALLEL_CASES).
+  --cases   ID [ID ...]       Process only specific case folders (e.g. 00001 00003).
+  --skip-done                 Skip cases that already have ELMFIRE time_of_arrival output.
+
+SLURM example
+-------------
+  #SBATCH --job-name=wildfire_av
+  #SBATCH --ntasks=1
+  #SBATCH --cpus-per-task=16
+  #SBATCH --time=24:00:00
+  conda activate elmfire
+  python /path/to/Data/runWildfireAV --start run --workers 14
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import deque
+from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
+
+# Ensure Data/ root is on sys.path so subpackage imports work
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent))
+# Also ensure pipeline/ is on path so process_case deferred imports work
+_sys.path.insert(0, str(Path(__file__).parent / "pipeline"))
+_sys.path.insert(0, str(Path(__file__).parent / "setup"))
+
+import pipelineConfig as cfg
+from case_metadata import case_dirs
+
+FIRE_ROOT = Path(cfg.FIRE_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------------
+
+def _fmt(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+# ---------------------------------------------------------------------------
+# Clean helpers
+# ---------------------------------------------------------------------------
+
+def _clean_cases() -> None:
+    """Delete all numbered case folders (full reset before setup)."""
+    print("  Deleting all case folders …")
+    removed = 0
+    for child in FIRE_ROOT.iterdir():
+        if child.is_dir() and child.name.isdigit() and len(child.name) == 5:
+            shutil.rmtree(child)
+            removed += 1
+    # also remove summary CSVs and matched GeoPackages
+    for p in (cfg.FIRE_SUMMARY_CSV_PATH, cfg.FIRE_SUMMARY_SAT_CSV_PATH,
+              cfg.MTBS_PERIMS_WITH_IGNITIONS, cfg.USFS_POINTS_MATCHED):
+        if Path(p).exists():
+            Path(p).unlink()
+    print(f"  Removed {removed} case folder(s) and summary files.")
+
+
+def _clean_outputs(cases: list[str] | None) -> None:
+    """Delete per-case simulation outputs (keeps LANDFIRE.tif and metadata)."""
+    import cleanPipelineOutputs as cleaner
+    folders = ([FIRE_ROOT / n for n in cases] if cases else case_dirs(FIRE_ROOT))
+    from_idx = cleaner.STEP_NAMES.index("landfire_bands")
+    active_steps = cleaner._STEPS[from_idx:]
+    total = 0
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        targets = cleaner._targets_for_case(folder, active_steps, include_wind_tifs=True)
+        removed = sum(cleaner._delete(t, dry_run=False) for t in targets)
+        farsite_dir = folder / "farsite"
+        if farsite_dir.exists():
+            shutil.rmtree(farsite_dir)
+            removed += 1
+        if removed:
+            total += removed
+    print(f"  Cleaned simulation outputs ({total} item(s) removed).")
+
+
+# ---------------------------------------------------------------------------
+# Phase: setup
+# ---------------------------------------------------------------------------
+
+def phase_setup() -> None:
+    from parallel_api import Tee
+    import setup.setupPipeline as sp
+    FIRE_ROOT.mkdir(parents=True, exist_ok=True)
+    log_file = FIRE_ROOT / "pipeline_setup.log"
+    with open(log_file, "w", encoding="utf-8", buffering=1) as log:
+        tee = Tee(sys.stdout, log)
+        with redirect_stdout(tee), redirect_stderr(tee):
+            sp.main()
+    print(f"  Setup log → {log_file}")
+
+
+# ---------------------------------------------------------------------------
+# Phase: run
+# ---------------------------------------------------------------------------
+
+def phase_run(workers: int, cases: list[str] | None, skip_done: bool) -> None:
+    from pipeline.runBatch import _discover_cases, _is_done, _fmt_elapsed
+    from pipeline.runPipelineParallel import process_case
+
+    folders = _discover_cases(FIRE_ROOT, specific=cases, skip_done=skip_done)
+    if not folders:
+        print("  No cases to process.")
+        return
+
+    n_workers = min(workers, len(folders))
+    print(f"  Cases: {len(folders)}  |  Workers: {n_workers}  |  wind_source: {cfg.WINDNINJA_SOURCE}")
+
+    pending_queue: deque[Path] = deque(folders[n_workers:])
+    running: set[str] = {f.name for f in folders[:n_workers]}
+
+    print(f"\n  {'TIME':>8}   {'RESULT':<6}  {'CASE':<10}  {'PROGRESS':>10}  NOTE")
+    print(f"  {'-'*8}   {'-'*6}  {'-'*10}  {'-'*10}  ----")
+    print(f"  {'':>8}   {'START':<6}  {', '.join(sorted(running))}", flush=True)
+
+    t0 = time.monotonic()
+    ok_cases: list[str] = []
+    fail_cases: list[str] = []
+
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        future_to_folder = {pool.submit(process_case, f, True): f for f in folders}
+        for future in as_completed(future_to_folder):
+            folder = future_to_folder[future]
+            elapsed = time.monotonic() - t0
+            running.discard(folder.name)
+            note = ""
+            if pending_queue:
+                nxt = pending_queue.popleft()
+                running.add(nxt.name)
+                note = f"→ {nxt.name} started"
+            try:
+                future.result()
+                ok_cases.append(folder.name)
+                result_tag = "OK"
+            except Exception as exc:
+                fail_cases.append(folder.name)
+                result_tag = "FAIL"
+                note = f"{type(exc).__name__}: {str(exc)[:50]}"
+            n_done = len(ok_cases) + len(fail_cases)
+            print(
+                f"  {_fmt(elapsed):>8}   {result_tag:<6}  {folder.name:<10}  "
+                f"{n_done}/{len(folders):>4}  {note}",
+                flush=True,
+            )
+
+    total = time.monotonic() - t0
+    print(f"\n  Finished {len(folders)} cases in {_fmt(total)}")
+    print(f"  OK: {len(ok_cases)}   FAIL: {len(fail_cases)}")
+    if fail_cases:
+        print("  Failed cases:")
+        for name in sorted(fail_cases):
+            print(f"    {name}")
+
+
+# ---------------------------------------------------------------------------
+# Phase: pdf
+# ---------------------------------------------------------------------------
+
+def phase_pdf() -> None:
+    import validation.getValidationPDF as pdf
+    pdf.main()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="ELMFIRE / FARSITE validation pipeline entry point.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument(
+        "--start",
+        choices=["setup", "run", "pdf"],
+        required=True,
+        help="Phase to start from; all later phases also run.",
+    )
+    p.add_argument("--workers", "-n", type=int, default=cfg.MAX_PARALLEL_CASES)
+    p.add_argument("--cases", nargs="+", metavar="FOLDER")
+    p.add_argument("--skip-done", action="store_true")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    start = args.start
+    phases = ["setup", "run", "pdf"]
+    active = phases[phases.index(start):]
+
+    t_total = time.monotonic()
+    print("=" * 60)
+    print("WILDFIRE VALIDATION PIPELINE")
+    print(f"  fire root   : {FIRE_ROOT}")
+    print(f"  wind source : {cfg.WINDNINJA_SOURCE}")
+    print(f"  start from  : {start}  →  {' → '.join(active)}")
+    print("=" * 60)
+
+    for phase in active:
+        t0 = time.monotonic()
+        print(f"\n{'─'*60}")
+        print(f"PHASE: {phase.upper()}")
+        print(f"{'─'*60}")
+
+        if phase == "setup":
+            _clean_cases()
+            phase_setup()
+        elif phase == "run":
+            if start == "run":   # only clean if run is the starting phase
+                _clean_outputs(args.cases)
+            phase_run(args.workers, args.cases, args.skip_done)
+        elif phase == "pdf":
+            phase_pdf()
+
+        print(f"\n  Phase '{phase}' completed in {_fmt(time.monotonic() - t0)}.")
+
+    print(f"\n{'='*60}")
+    print(f"DONE  ({_fmt(time.monotonic() - t_total)} total)")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()

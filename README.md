@@ -15,37 +15,53 @@ Data/
 ├── pipelineConfig.py                  ← single source of truth for all settings
 ├── parallel_api.py                    ← shared utilities (Tee, logging, retries)
 ├── case_metadata.py                   ← read/write per-case JSON metadata
+├── cleanPipelineOutputs.py            ← clean per-case simulation outputs
 
-# Master entry point
-├── run_validation.py                  ← clean / setup / run / pdf phases
+# Master entry point (replaces run_validation.py)
+├── runWildfireAV                      ← single CLI: setup / run / pdf
 
 # Setup scripts (run once, locally)
-├── setupPipeline.py                   ← orchestrates setup steps 1-5
-├── processScarsAndPoints.py           ← step 1: match perimeters → ignition points
-├── separateScarsAndPointsToCases.py   ← step 2: create numbered case folders
-├── getSatelliteEndTimes.py            ← step 3: compute satellite start/end times
-├── eraseInvalidCases.py               ← step 4: remove short/invalid cases
+├── setup/
+│   ├── setupPipeline.py               ← orchestrates setup steps 1-5
+│   ├── processScarsAndPoints.py       ← step 1: match perimeters → ignition points
+│   ├── separateScarsAndPointsToCases.py ← step 2: create numbered case folders
+│   ├── getSatelliteEndTimes.py        ← step 3: compute satellite start/end times
+│   └── eraseInvalidCases.py          ← step 4: remove short/invalid cases
 
 # Per-case simulation pipeline (run in parallel)
-├── runPipelineParallel.py             ← orchestrates per-case steps (see below)
-├── getLandfireProductsForFireSim.py   ← step 1:  download LANDFIRE from LFPS
-├── splitLandfireTifBands.py           ← step 2:  split multi-band LANDFIRE.tif
-├── makePhiAndAdjFiles.py              ← step 3:  create adj/phi rasters
-├── downloadWeatherData.py             ← step 4:  fetch ERA5 weather (OpenMeteo)
-├── downloadAndRunWindninja_WXS.py     ← step 5a: WindNinja (WINDNINJA_SOURCE=install)
-├── downloadAndRunWindninja_wxModel.py ← step 5b: WindNinja wx-model variant
-├── wn_to_geotiff.py                   ← helper: convert WindNinja ASCII → GeoTIFF
-├── applyNelsonModel.py                ← step 6:  compute dead-fuel moisture
-├── getBarrierFile.py                  ← step 7:  rasterise road/water barriers
-├── createElmfireInputFiles.py         ← step 8:  write ELMFIRE namelist (.data)
-├── prepareFarsite.py                  ← step 9:  create FARSITE inputs (LCP, etc.)
-├── runElmfireCase.py                  ← step 10: execute ELMFIRE
-├── runFarsiteCase.py                  ← step 11: execute FARSITE via Wine
-├── farsiteWindToGeotiff.py            ← step 12: extract ws/wd from FARSITE winds
-                                          (only when WINDNINJA_SOURCE=farsite)
+├── pipeline/
+│   ├── runPipelineParallel.py         ← orchestrates per-case steps (see below)
+│   ├── runBatch.py                    ← parallel batch runner
+│   ├── getLandfireProductsForFireSim.py ← step 1:  download LANDFIRE from LFPS
+│   ├── splitLandfireTifBands.py       ← step 2:  split multi-band LANDFIRE.tif
+│   ├── makePhiAndAdjFiles.py          ← step 3:  create adj/phi rasters
+│   ├── downloadWeatherData.py         ← step 4:  fetch ERA5 weather (OpenMeteo)
+│   ├── downloadAndRunWindninja_WXS.py ← step 5a: WindNinja (WINDNINJA_SOURCE=install)
+│   ├── downloadAndRunWindninja_wxModel.py ← step 5b: WindNinja wx-model variant
+│   ├── downloadAndRunWindninja.py     ← step 5c: WindNinja (legacy)
+│   ├── wn_to_geotiff.py               ← helper: convert WindNinja ASCII → GeoTIFF
+│   ├── applyNelsonModel.py            ← step 6:  compute dead-fuel moisture
+│   ├── getBarrierFile.py              ← step 7:  rasterise road/water barriers
+│   ├── createElmfireInputFiles.py     ← step 8:  write ELMFIRE namelist (.data)
+│   ├── prepareFarsite.py              ← step 9:  create FARSITE inputs (LCP, etc.)
+│   ├── runElmfireCase.py              ← step 10: execute ELMFIRE
+│   ├── runFarsiteCase.py              ← step 11: execute FARSITE via Wine
+│   └── farsiteWindToGeotiff.py       ← step 12: extract ws/wd from FARSITE winds
+│                                         (only when WINDNINJA_SOURCE=farsite)
 
 # Validation report
-├── getValidationPDF.py                ← generate multi-page validation PDF
+├── validation/
+│   └── getValidationPDF.py            ← generate multi-page validation PDF
+
+# Developer / debug utilities
+├── tools/
+│   ├── monitorBatch.py                ← real-time batch progress monitor
+│   ├── prefetchLandfire.py            ← pre-fetch LANDFIRE for all cases
+│   ├── debugBandCounts.py             ← debug raster band counts per case
+│   ├── debugSatelliteEndTimes.py      ← inspect satellite coverage curves
+│   ├── compareOutputs.py              ← multi-model PDF comparison (fast)
+│   ├── visualiseSingleCase.py         ← plot observed vs simulated for one case
+│   └── getWeatherHerbie.py            ← fetch weather via Herbie (dev use)
 
 # Data directories
 ├── Barriers/                          ← OSM roads/waterways GeoPackages
@@ -303,50 +319,50 @@ ELMFIRE_PATH_TO_GDAL = "/path/to/your/conda/envs/elmfire/bin/"
 
 ### 2. Run the full pipeline
 
+`runWildfireAV` is the single entry point.  The `--start` flag selects the
+phase to begin from; all later phases also run automatically.
+
 ```bash
-# Full pipeline from scratch:
-python run_validation.py
+# Full pipeline from scratch (clean cases → setup → run → pdf):
+./runWildfireAV --start setup
 
-# Skip clean + setup (case folders already prepared):
-python run_validation.py --phases run pdf
+# Clean simulation outputs, re-run all cases, regenerate pdf:
+./runWildfireAV --start run
 
-# Regenerate PDF only:
-python run_validation.py --phases pdf
+# Regenerate PDF only (no simulation):
+./runWildfireAV --start pdf
 
-# Clean outputs then re-run (keep existing case folders):
-python run_validation.py --phases clean run pdf
-
-# Parallel run, skip cases that already have ELMFIRE outputs:
-python run_validation.py --phases run pdf --workers 8 --skip-done
+# Parallel run with 8 workers, skip completed cases:
+./runWildfireAV --start run --workers 8 --skip-done
 
 # Process specific cases only:
-python run_validation.py --phases run pdf --cases 00001 00005 00008
+./runWildfireAV --start run --cases 00001 00005 00008
 ```
 
-See `python run_validation.py --help` for all options.
+See `./runWildfireAV --help` for all options.
 
 ---
 
 ## Pipeline phases
 
-### Phase: setup
+### Phase: setup (`--start setup`)
 
-Runs the one-time case-preparation pipeline.  Only needed when starting fresh
-or changing case-selection parameters (year range, area threshold, etc.).
+Runs the one-time case-preparation pipeline.  Deletes all existing numbered
+case folders first (full reset), then rebuilds them from the raw MTBS and USFS
+input data.
 
 | Step | Script | Output |
 |------|--------|--------|
-| 1 | `processScarsAndPoints.py` | `perimeters_ignitions.gpkg`, `all_ignitions.gpkg` |
-| 2 | `separateScarsAndPointsToCases.py` | `00001/`, `00002/`, …, `fire_pairs_summary.csv` |
-| 3 | `getSatelliteEndTimes.py` | `fire_pairs_summary_with_satellite.csv` |
-| 4 | `eraseInvalidCases.py` | removes cases shorter than `MIN_HOURS_DURATION` h |
+| 1 | `setup/processScarsAndPoints.py` | `perimeters_ignitions.gpkg`, `all_ignitions.gpkg` |
+| 2 | `setup/separateScarsAndPointsToCases.py` | `00001/`, `00002/`, …, `fire_pairs_summary.csv` |
+| 3 | `setup/getSatelliteEndTimes.py` | `fire_pairs_summary_with_satellite.csv` |
+| 4 | `setup/eraseInvalidCases.py` | removes cases shorter than `MIN_HOURS_DURATION` h |
 | 5 | `write_metadata_from_summary` | `case_metadata.json` in each folder |
 
-Use `--setup-clean` to delete all generated files first (full reset).
+### Phase: run (`--start run`)
 
-### Phase: run
-
-Executes the per-case simulation pipeline in parallel using
+Cleans per-case simulation outputs (from `landfire_bands` onwards), then
+executes the per-case simulation pipeline in parallel using
 `ProcessPoolExecutor`.  Step order depends on `WINDNINJA_SOURCE`:
 
 #### `WINDNINJA_SOURCE = "install"` (default)
@@ -384,7 +400,7 @@ Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE w
 Step 12  runElmfireCase                 →  outputs/time_of_arrival_*.tif
 ```
 
-### Phase: pdf
+### Phase: pdf (`--start pdf`)
 
 Generates `validation.pdf` in `FIRE_ROOT`.  The report contains one page per
 case plus four summary pages:
@@ -397,28 +413,23 @@ case plus four summary pages:
 | Summary 3 | Area estimation bias per case (asymmetric log₂ bar chart) |
 | Summary 4 | Similarity score distribution histograms |
 
-### Phase: clean
+### Cleaning outputs
 
-Deletes per-case simulation outputs so cases can be re-run.  Preserves
-`LANDFIRE.tif`, `case_metadata.json`, and fire geometry files.
+Cleaning is integrated into the entry point:
+
+- `--start setup` deletes all numbered case folders before re-running setup.
+- `--start run` deletes per-case simulation outputs (from `landfire_bands`
+  onwards, including `farsite/` directories) before re-running simulations.
+  `LANDFIRE.tif`, `case_metadata.json`, and fire geometry files are preserved.
+
+For fine-grained control use `cleanPipelineOutputs.py` directly:
 
 ```bash
-# Clean from landfire_bands step onwards (default):
-python run_validation.py --phases clean
-
-# Clean only ELMFIRE outputs, keep everything else:
-python run_validation.py --phases clean --clean-from elmfire_outputs
-
-# Also delete ws.tif / wd.tif:
-python run_validation.py --phases clean --include-wind-tifs
-
-# Preview what would be deleted without doing it:
-python run_validation.py --phases clean --dry-run
+python cleanPipelineOutputs.py                          # dry-run by default
+python cleanPipelineOutputs.py --execute                # actually delete
+python cleanPipelineOutputs.py --from elmfire_outputs   # only ELMFIRE outputs
+python cleanPipelineOutputs.py --include-wind-tifs      # also delete ws/wd.tif
 ```
-
-Available `--clean-from` values:
-`landfire_bands`, `phi_adj`, `weather`, `windninja`, `nelson`, `barrier`,
-`elmfire_inputs`, `elmfire_outputs`
 
 ---
 
@@ -545,7 +556,8 @@ All settings are documented inline in `pipelineConfig.py`.
 - WindNinja creates many `step_NNN/` subdirectories.  These are deleted
   automatically by `wn_to_geotiff.clean_windninja_outputs()` after `ws.tif`
   and `wd.tif` are built.  If a run was interrupted mid-step, re-run from the
-  `windninja` step: `python run_validation.py --phases clean run --clean-from windninja`.
+  `windninja` step: `python cleanPipelineOutputs.py --from windninja --execute`
+  then `./runWildfireAV --start run`.
 - All GeoTIFF outputs use LZW compression + tiling.
 
 ---
@@ -565,5 +577,7 @@ All settings are documented inline in `pipelineConfig.py`.
 - **`case_metadata.py`** handles all JSON serialisation of per-case metadata,
   including datetime normalisation.
 
+- Scripts in `tools/` are standalone dev/debug utilities and do not participate
+  in the main pipeline.
 - Scripts in `serial/` are slower sequential versions kept for debugging.
   Scripts in `old_code/` are obsolete.
