@@ -239,7 +239,7 @@ All input data lives under `inputs/` and is not version-controlled (listed in
 ### MTBS burn perimeters
 
 - **Source**: [MTBS Data Access](https://www.mtbs.gov/direct-download)
-- **Place at**: `inputs/perimeters/mtbs_perims_DD.shp` (+ sidecar files)
+- **Place at**: `inputs/perimeters/mtbs_perimeters.shp` (+ sidecar files)
 
 ### USFS fire occurrence points
 
@@ -251,7 +251,7 @@ All input data lives under `inputs/` and is not version-controlled (listed in
 - **Source**: NASA FIRMS archive (VIIRS/MODIS active fire detections for the US)
 - Merge all downloaded shapefiles into a single GeoPackage with layer `output`.
   Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM string), plus geometry.
-- **Place at**: `inputs/satellites/clipped.gpkg`
+- **Place at**: `inputs/satellites/nasa_lance_allSatellites.gpkg`
 
 ### OSM road and waterway barriers
 
@@ -519,6 +519,8 @@ All settings are documented inline in `pipelineConfig.py`.
 ## Troubleshooting
 
 ### LANDFIRE job fails or times out
+- The pipeline retries each LANDFIRE download up to 3 times automatically
+  (`MAX_RETRIES` in `getLandfireProductsForFireSim.py`).
 - Check that `LANDFIRE_EMAIL` is registered with LFPS.
 - Increase `LFPS_POLL_MAX_TRIES` (default 300 × 10 s ≈ 50 min).
 - The LFPS service can be slow during peak hours; try again later.
@@ -539,6 +541,15 @@ All settings are documented inline in `pipelineConfig.py`.
 - Check `ELMFIRE_PATH_TO_GDAL` points to a directory containing `gdal_translate`.
 - The `outputs/` and `scratch/` directories are created automatically; existing
   contents are overwritten on re-run.
+
+### Setup step 1 reports "no valid cases found"
+- The four filter stages (area, year, name+date match, spatial) each raise a
+  `RuntimeError` with a specific message and the relevant `pipelineConfig.py`
+  knobs to relax:
+  - **No perimeters**: lower `MTBS_AREA_THRESHOLD_ACRES` or widen `MIN/MAX_FIRE_YEAR`.
+  - **No points**: widen `MIN/MAX_FIRE_YEAR`.
+  - **No name+date matches**: increase `DAY_TOLERANCE_DAYS`.
+  - **No spatial matches**: increase `DAY_TOLERANCE_DAYS` or lower `MTBS_AREA_THRESHOLD_ACRES`.
 
 ### Satellite end time not found
 - Some fires have sparse satellite coverage.  Cases where coverage never
@@ -578,5 +589,3 @@ All settings are documented inline in `pipelineConfig.py`.
 
 - Scripts in `tools/` are standalone dev/debug utilities and do not participate
   in the main pipeline.
-- Scripts in `serial/` are slower sequential versions kept for debugging.
-  Scripts in `old_code/` are obsolete.

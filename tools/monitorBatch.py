@@ -25,6 +25,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Allow running from tools/ or from the Data/ root
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pipelineConfig as cfg
 from case_metadata import case_dirs
 
@@ -35,28 +38,36 @@ REFRESH_SECONDS = 10
 # ---------------------------------------------------------------------------
 
 STEPS: dict[int, str] = {
-    1: "download_landfire",
-    2: "split_landfire_bands",
-    3: "make_adj_phi",
-    4: "download_weather_wxs",
-    5: "download_and_run_windninja",
-    6: "apply_nelson_model",
-    7: "create_barrier_file",
-    8: "create_elmfire_input_files",
-    9: "run_elmfire",
+    1:  "download_landfire",
+    2:  "split_landfire_bands",
+    3:  "make_adj_phi",
+    4:  "download_weather_wxs",
+    5:  "windninja",
+    6:  "apply_nelson_model",
+    7:  "create_barrier_file",
+    8:  "create_elmfire_input_files",
+    9:  "prepare_farsite",
+    10: "run_farsite / run_elmfire",
+    11: "farsite_wind_to_geotiff / run_farsite",
+    12: "run_elmfire",
 }
 
 STEP_SHORT: dict[int, str] = {
-    1: "landfire",
-    2: "split bands",
-    3: "phi / adj",
-    4: "weather",
-    5: "windninja",
-    6: "nelson",
-    7: "barrier",
-    8: "elm inputs",
-    9: "elmfire",
+    1:  "landfire",
+    2:  "split bands",
+    3:  "phi / adj",
+    4:  "weather",
+    5:  "windninja",
+    6:  "nelson",
+    7:  "barrier",
+    8:  "elm inputs",
+    9:  "prep farsite",
+    10: "farsite/elmfire",
+    11: "wind→tif/farsite",
+    12: "elmfire",
 }
+
+MAX_STEP = max(STEPS)
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -268,7 +279,7 @@ def _parse_case(case_dir: Path) -> CaseStatus:
     if outputs.is_dir() and any(outputs.glob("time_of_arrival_*.tif")):
         log_file = case_dir / "pipeline.log"
         return CaseStatus(
-            name, "done", 9, STEP_SHORT[9], "",
+            name, "done", MAX_STEP, STEP_SHORT[MAX_STEP], "",
             _done_elapsed(log_file) if log_file.exists() else 0.0,
         )
 
@@ -288,10 +299,10 @@ def _parse_case(case_dir: Path) -> CaseStatus:
 
     # ── DONE via log (fallback when TOA file not yet visible on disk) ─────
     if any("CASE COMPLETED." in ln for ln in lines[-10:]):
-        return CaseStatus(name, "done", 9, STEP_SHORT[9], "", _done_elapsed(log_file))
+        return CaseStatus(name, "done", MAX_STEP, STEP_SHORT[MAX_STEP], "", _done_elapsed(log_file))
 
     # ── Parse current step ─────────────────────────────────────────────────
-    step_re = re.compile(r"=== STEP (\d+)/\d+:\s*(\S+)")
+    step_re = re.compile(r"=== STEP (\d+):\s*(\S+)")
     step_num   = 0
     step_label = ""
     for line in lines:
@@ -373,7 +384,7 @@ def _render(statuses: list[CaseStatus], interval: int) -> str:
         if cs.status in ("pending", "done"):
             continue
         fmt       = STATUS_FMT.get(cs.status, dim)
-        step_str  = f"{cs.step_num}/9  {cs.step_short}" if cs.step_num else "—"
+        step_str  = f"{cs.step_num}/{MAX_STEP}  {cs.step_short}" if cs.step_num else "—"
         detail    = cs.detail[:_W_DETAIL]
         elapsed   = _fmt_elapsed(cs.elapsed_s)
 

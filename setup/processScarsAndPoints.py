@@ -95,6 +95,14 @@ def main() -> None:
     perims = perims.reset_index().rename(columns={"index": "perim_idx"})
     perims = perims.set_index("perim_idx", drop=False)
     print(f"Perimeters after area/year/name filter: {len(perims)}")
+    if len(perims) == 0:
+        raise RuntimeError(
+            "No MTBS perimeters remain after filtering.\n"
+            f"  Current settings:  area > {threshold} acres,  year {min_year}–{max_year}\n"
+            "  To fix, relax one or more of these in pipelineConfig.py:\n"
+            "    MTBS_AREA_THRESHOLD_ACRES  (lower the minimum burn area)\n"
+            "    MIN_FIRE_YEAR / MAX_FIRE_YEAR  (widen the year range)"
+        )
 
     # ------------------------------------------------------------------
     # 2. Load and filter ignition points
@@ -120,6 +128,13 @@ def main() -> None:
     points = points.reset_index().rename(columns={"index": "pt_idx"})
     points = points.set_index("pt_idx", drop=False)
     print(f"Points after year/name filter: {len(points)}")
+    if len(points) == 0:
+        raise RuntimeError(
+            "No USFS ignition points remain after filtering.\n"
+            f"  Current settings:  year {min_year}–{max_year}\n"
+            "  To fix, relax in pipelineConfig.py:\n"
+            "    MIN_FIRE_YEAR / MAX_FIRE_YEAR  (widen the year range)"
+        )
 
     if perims.crs != points.crs:
         print(f"Reprojecting points from {points.crs} to {perims.crs}")
@@ -139,6 +154,13 @@ def main() -> None:
     mask_time = merged[perim_date_field].notna() & (date_diff <= day_tolerance)
     merged_time = merged[mask_time].copy()
     print(f"Matches after name + date filter: {len(merged_time)}")
+    if len(merged_time) == 0:
+        raise RuntimeError(
+            "No perimeter–point matches found after name and date filtering.\n"
+            f"  Current settings:  DAY_TOLERANCE_DAYS = {day_tolerance}\n"
+            "  To fix, relax in pipelineConfig.py:\n"
+            "    DAY_TOLERANCE_DAYS  (allow a wider date window for matching)"
+        )
 
     # ------------------------------------------------------------------
     # 4. Spatial filter: point must lie inside matched polygon
@@ -149,6 +171,14 @@ def main() -> None:
     matched_pt_idxs = merged_spatial["pt_idx"].unique()
     points_matched = points_df.loc[matched_pt_idxs].copy()
     print(f"Unique matched points (after spatial filter): {len(points_matched)}")
+    if len(points_matched) == 0:
+        raise RuntimeError(
+            "No matches survived the spatial filter (point must lie inside polygon).\n"
+            f"  {len(merged_time)} name+date match(es) were found but none passed spatial check.\n"
+            "  To fix, try relaxing in pipelineConfig.py:\n"
+            "    DAY_TOLERANCE_DAYS  (wider date window may yield better spatial matches)\n"
+            "    MTBS_AREA_THRESHOLD_ACRES  (smaller fires may have better point coverage)"
+        )
 
     matched_perim_idxs = merged_spatial["perim_idx"].astype(int).unique()
     perims_matched = perims_df.loc[matched_perim_idxs].copy()
