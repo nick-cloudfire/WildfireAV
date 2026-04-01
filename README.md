@@ -64,12 +64,14 @@ Data/
 │   └── getWeatherHerbie.py            ← fetch weather via Herbie (dev use)
 
 # Data directories
-├── Barriers/                          ← OSM roads/waterways GeoPackages
-├── Perimeters/                        ← MTBS burn perimeters shapefile
-├── satellites/                        ← VIIRS/MODIS hotspot GeoPackage
+# Input data (not version-controlled — see Input data requirements below)
+├── inputs/
+│   ├── perimeters/                    ← MTBS burn perimeters shapefile
+│   ├── satellites/                    ← VIIRS/MODIS hotspot GeoPackage (clipped.gpkg)
+│   ├── barriers/                      ← OSM roads/waterways + backup rivers
+│   └── usfs_fire_points.geojson       ← USFS fire occurrence points
 ├── FB/                                ← FARSITE SDK (bin/TestFARSITE.exe, etc.)
-├── nelson_csharp/                     ← Nelson dead-fuel model (C# executable)
-└── bin/                               ← GDAL and other binaries
+└── nelson_csharp/                     ← Nelson dead-fuel model (C# source + binary)
 ```
 
 ---
@@ -226,68 +228,62 @@ WINDNINJA_SOURCE = "install"           # or "farsite"
 
 ## Input data requirements
 
-The pipeline requires the following external datasets.  Download them once and
-place them at the paths configured in `pipelineConfig.py`.
+All input data lives under `inputs/` and is not version-controlled (listed in
+`.gitignore`).  Download these datasets once and place them at the paths below.
 
 ### MTBS burn perimeters
 
 - **Source**: [MTBS Data Access](https://www.mtbs.gov/direct-download)
-- **File**: `mtbs_perims_DD.shp` (national perimeter shapefile)
-- **Place at**: `pipelineConfig.MTBS_PERIMS_RAW`
-  (default `Data/Perimeters/mtbs_perims_DD.shp`)
+- **Place at**: `inputs/perimeters/mtbs_perims_DD.shp` (+ sidecar files)
 
 ### USFS fire occurrence points
 
-- **Source**: USFS ArcGIS Feature Service — download as GeoJSON:
-  `National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson`
-- **Place at**: `pipelineConfig.USFS_POINTS_RAW`
-  (default `Data/National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson`)
+- **Source**: USFS ArcGIS Feature Service — download as GeoJSON and rename:
+- **Place at**: `inputs/usfs_fire_points.geojson`
 
 ### VIIRS / MODIS satellite hotspot detections
 
-- **Source**: NASA FIRMS archive — download the VIIRS/MODIS active fire
-  detections for the US and convert to a GeoPackage named `clipped.gpkg`
-  with layer `output`.  Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM
-  string), plus geometry.
-- **Place at**: `pipelineConfig.SATELLITE_GPKG`
-  (default `Data/satellites/clipped.gpkg`)
+- **Source**: NASA FIRMS archive (VIIRS/MODIS active fire detections for the US)
+- Merge all downloaded shapefiles into a single GeoPackage with layer `output`.
+  Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM string), plus geometry.
+- **Place at**: `inputs/satellites/clipped.gpkg`
 
 ### OSM road and waterway barriers
 
-Pre-processed OpenStreetMap extracts in GeoPackage format:
+Pre-processed OpenStreetMap extracts in GeoPackage / shapefile format:
 
 | File | Contents | Config key |
 |------|----------|------------|
-| `Barriers/us_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
-| `Barriers/waterways.gpkg` | OSM waterways (layer `lines`, field `waterway`) | `WATER_GPKG` |
-| `Barriers/us_rivers.shp` | Backup river shapefile for areas with poor OSM coverage | `BACKUP_WATER_SHP` |
+| `inputs/barriers/us_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
+| `inputs/barriers/waterways.gpkg` | OSM waterways (layer `lines`, field `waterway`) | `WATER_GPKG` |
+| `inputs/barriers/us_rivers.shp` | Backup river shapefile for areas with poor OSM coverage | `BACKUP_WATER_SHP` |
 
-These can be extracted from a US OSM `.pbf` file using `osmium` + `ogr2ogr`,
-or downloaded from [GeoFabrik](https://download.geofabrik.de/).
+Road/waterway GeoPackages can be extracted from a US OSM `.pbf` file using
+`osmium` + `ogr2ogr`, or downloaded from [GeoFabrik](https://download.geofabrik.de/).
 
 ### LANDFIRE (downloaded automatically)
 
-LANDFIRE terrain and fuel rasters are downloaded automatically per case via the
-USGS LFPS API during step 1 of the simulation pipeline.  No manual download is
-required — only a valid `LANDFIRE_EMAIL` registered at
-[USGS LFPS](https://lfps.usgs.gov) is needed.
+LANDFIRE terrain and fuel rasters are fetched automatically per case via the
+USGS LFPS API (step 1 of the simulation pipeline).  No manual download needed —
+only a valid `LANDFIRE_EMAIL` registered at [USGS LFPS](https://lfps.usgs.gov).
 
-### Summary of required files before first run
+### Required layout before first run
 
 ```
 Data/
-├── Perimeters/
-│   └── mtbs_perims_DD.shp   (+ .dbf, .prj, .shx)
-├── satellites/
-│   └── clipped.gpkg
-├── Barriers/
-│   ├── us_roads.gpkg
-│   ├── waterways.gpkg
-│   └── us_rivers.shp        (+ .dbf, .prj, .shx)
-├── FB/                       (FARSITE SDK)
+├── inputs/
+│   ├── perimeters/
+│   │   └── mtbs_perims_DD.shp   (+ .dbf, .prj, .shx, …)
+│   ├── satellites/
+│   │   └── clipped.gpkg
+│   ├── barriers/
+│   │   ├── us_roads.gpkg
+│   │   ├── waterways.gpkg
+│   │   └── us_rivers.shp        (+ .dbf, .prj, .shx)
+│   └── usfs_fire_points.geojson
+├── FB/                           (FARSITE SDK — see WSL setup above)
 │   └── bin/TestFARSITE.exe
-├── nelson_csharp/            (built from source — see WSL setup above)
-└── National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson
+└── nelson_csharp/                (built from source — see WSL setup above)
 ```
 
 ---

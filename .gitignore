@@ -1,12 +1,7 @@
-'old_code/'
-'Perimeter_Data/'
-satellites/
-scratch/
 __pycache__/
-Barriers/
-bin/
-CONUS/
-nelson_csharp/
-National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson
 *.qgz
 
+# Input data (large files, not version-controlled)
+inputs/
+FB/
+nelson_csharp/

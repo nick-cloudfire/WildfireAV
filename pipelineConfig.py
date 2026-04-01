@@ -49,9 +49,9 @@ BASE_VALIDATION         = Path(r"/home/nick/elmfire_validation/")
 BASE_DATA               = BASE_VALIDATION / "Data"
 FIRE_ROOT_LOGIN_NODE    = BASE_VALIDATION / "FirePairs"   # setup output (login node)
 FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FirePairs"  # HPC scratch location
-PERIMETER_DATA_ROOT     = BASE_DATA / "Perimeters"
-SATELLITES_ROOT         = BASE_DATA / "satellites"
-BIN_ROOT                = BASE_DATA / "bin"
+INPUTS_DATA_ROOT        = BASE_DATA / "inputs"
+PERIMETER_DATA_ROOT     = INPUTS_DATA_ROOT / "perimeters"
+SATELLITES_ROOT         = INPUTS_DATA_ROOT / "satellites"
 FARSITE_FB_DIR          = BASE_DATA / "FB"          # root of the FireBehavior SDK folder
 FARSITE_EXE_NAME        = "TestFARSITE.exe"         # executable name inside FB/bin/
 
@@ -95,7 +95,7 @@ WS_WD_END_COL           = COL_SATELLITE_END
 # =============================================================================
 
 MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perims_DD.shp"
-USFS_POINTS_RAW             = BASE_DATA / "National_USFS_Fire_Occurrence_Point_(Feature_Layer).geojson"
+USFS_POINTS_RAW             = INPUTS_DATA_ROOT / "usfs_fire_points.geojson"
 
 # These intermediate files are written to / read from FIRE_ROOT_LOGIN_NODE
 MTBS_PERIMS_WITH_IGNITIONS  = FIRE_ROOT_LOGIN_NODE / "perimeters_ignitions.gpkg"
@@ -195,11 +195,11 @@ ELMFIRE_SCRATCH_SUBDIR  = "scratch"
 # 11. BARRIER FILE
 # =============================================================================
 
-ROADS_GPKG          = BASE_DATA / "Barriers" / "us_roads.gpkg"
+ROADS_GPKG          = INPUTS_DATA_ROOT / "barriers" / "us_roads.gpkg"
 ROADS_LAYER         = "lines"
-WATER_GPKG          = BASE_DATA / "Barriers" / "waterways.gpkg"
+WATER_GPKG          = INPUTS_DATA_ROOT / "barriers" / "waterways.gpkg"
 WATER_LAYER         = "lines"
-BACKUP_WATER_SHP    = BASE_DATA / "Barriers" / "us_rivers.shp"
+BACKUP_WATER_SHP    = INPUTS_DATA_ROOT / "barriers" / "us_rivers.shp"
 
 ROAD_CLASS_FIELD    = "highway"
 WATER_CLASS_FIELD   = "waterway"
