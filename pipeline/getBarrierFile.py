@@ -34,7 +34,7 @@ ROADS_GPKG          = cfg.ROADS_GPKG
 ROADS_LAYER         = cfg.ROADS_LAYER
 WATER_GPKG          = cfg.WATER_GPKG
 WATER_LAYER         = cfg.WATER_LAYER
-BACKUP_WATER_SHP    = cfg.BACKUP_WATER_SHP
+BACKUP_WATER_GPKG    = cfg.BACKUP_WATER_GPKG
 WRITE_TEMP          = cfg.WRITE_TEMP_CLIPS
 KEEP_TEMP           = cfg.KEEP_TEMP_CLIPS
 ALL_TOUCHED         = cfg.ALL_TOUCHED
@@ -279,16 +279,16 @@ def process_one_folder(folder: Path) -> bool:
         if not tmp_water.exists():
             _clip_with_ogr2ogr(bounds, crs, str(WATER_GPKG), WATER_LAYER,
                                 str(tmp_water), where=f"{WATER_CLASS_FIELD} IS NOT NULL")
-        if BACKUP_WATER_SHP.exists() and not tmp_backup.exists():
-            _clip_with_ogr2ogr(bounds, crs, str(BACKUP_WATER_SHP), None, str(tmp_backup))
+        if BACKUP_WATER_GPKG.exists() and not tmp_backup.exists():
+            _clip_with_ogr2ogr(bounds, crs, str(BACKUP_WATER_GPKG), None, str(tmp_backup))
         roads_src, roads_lyr = str(tmp_roads), None
         water_src, water_lyr = str(tmp_water), None
 
     roads  = _read_and_clip(roads_src, roads_lyr, crs, bounds)
     water  = _read_and_clip(water_src, water_lyr, crs, bounds)
     backup = gpd.GeoDataFrame(geometry=[], crs=crs)
-    if BACKUP_WATER_SHP.exists():
-        backup = _read_and_clip(str(BACKUP_WATER_SHP), None, crs, bounds)
+    if BACKUP_WATER_GPKG.exists():
+        backup = _read_and_clip(str(BACKUP_WATER_GPKG), None, crs, bounds)
 
     road_shapes  = _dissolve_buffer_by_class(roads,  ROAD_CLASS_FIELD,  ROAD_WIDTHS_M)
     water_shapes = _dissolve_buffer_by_class(water,  WATER_CLASS_FIELD, WATER_WIDTHS_M)

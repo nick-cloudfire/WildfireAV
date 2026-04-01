@@ -52,7 +52,7 @@ FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FireP
 INPUTS_DATA_ROOT        = BASE_DATA / "inputs"
 PERIMETER_DATA_ROOT     = INPUTS_DATA_ROOT / "perimeters"
 SATELLITES_ROOT         = INPUTS_DATA_ROOT / "satellites"
-FARSITE_FB_DIR          = BASE_DATA / "FB"          # root of the FireBehavior SDK folder
+FARSITE_FB_DIR          = INPUTS_DATA_ROOT / "FB"   # root of the FireBehavior SDK folder
 FARSITE_EXE_NAME        = "TestFARSITE.exe"         # executable name inside FB/bin/
 
 # =============================================================================
@@ -94,7 +94,7 @@ WS_WD_END_COL           = COL_SATELLITE_END
 # 5. MTBS PERIMETERS & USFS IGNITION POINTS
 # =============================================================================
 
-MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perims_DD.shp"
+MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perimeters.shp"
 USFS_POINTS_RAW             = INPUTS_DATA_ROOT / "usfs_fire_points.geojson"
 
 # These intermediate files are written to / read from FIRE_ROOT_LOGIN_NODE
@@ -140,7 +140,7 @@ RASTER_NODATA   = -9999.0
 # 7. SATELLITE END-TIME DETECTION
 # =============================================================================
 
-SATELLITE_GPKG          = SATELLITES_ROOT / "clipped.gpkg"
+SATELLITE_GPKG          = SATELLITES_ROOT / "nasa_lance_allSatellites.gpkg"
 SATELLITE_LAYER_NAME    = "output"
 SAT_DATE_COL            = "ACQ_DATE"        # date column in satellite layer
 SAT_TIME_COL            = "ACQ_TIME"        # HHMM string column
@@ -195,11 +195,11 @@ ELMFIRE_SCRATCH_SUBDIR  = "scratch"
 # 11. BARRIER FILE
 # =============================================================================
 
-ROADS_GPKG          = INPUTS_DATA_ROOT / "barriers" / "us_roads.gpkg"
+ROADS_GPKG          = INPUTS_DATA_ROOT / "barriers" / "osm_conus_roads.gpkg"
 ROADS_LAYER         = "lines"
-WATER_GPKG          = INPUTS_DATA_ROOT / "barriers" / "waterways.gpkg"
+WATER_GPKG          = INPUTS_DATA_ROOT / "barriers" / "grwl.gpkg"
 WATER_LAYER         = "lines"
-BACKUP_WATER_SHP    = INPUTS_DATA_ROOT / "barriers" / "us_rivers.shp"
+BACKUP_WATER_GPKG   = INPUTS_DATA_ROOT / "barriers" / "osm_conus_rivers.gpkg"
 
 ROAD_CLASS_FIELD    = "highway"
 WATER_CLASS_FIELD   = "waterway"

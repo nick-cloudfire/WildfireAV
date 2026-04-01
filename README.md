@@ -66,11 +66,16 @@ Data/
 # Data directories
 # Input data (not version-controlled — see Input data requirements below)
 ├── inputs/
-│   ├── perimeters/                    ← MTBS burn perimeters shapefile
-│   ├── satellites/                    ← VIIRS/MODIS hotspot GeoPackage (clipped.gpkg)
-│   ├── barriers/                      ← OSM roads/waterways + backup rivers
-│   └── usfs_fire_points.geojson       ← USFS fire occurrence points
-├── FB/                                ← FARSITE SDK (bin/TestFARSITE.exe, etc.)
+│   ├── perimeters/
+│   │   └── mtbs_perimeters.shp        ← MTBS burn perimeters
+│   ├── satellites/
+│   │   └── nasa_lance_allSatellites.gpkg  ← VIIRS/MODIS/Landsat hotspot detections
+│   ├── barriers/
+│   │   ├── osm_conus_roads.gpkg       ← OSM road network
+│   │   ├── grwl.gpkg                  ← Global River Widths from Landsat waterways
+│   │   └── osm_conus_rivers.gpkg      ← Backup river polygons
+│   ├── usfs_fire_points.geojson       ← USFS fire occurrence points
+│   └── FB/                            ← FARSITE SDK (bin/TestFARSITE.exe, etc.)
 └── nelson_csharp/                     ← Nelson dead-fuel model (C# source + binary)
 ```
 
@@ -194,13 +199,13 @@ The compiled binary path is set automatically by `pipelineConfig.NELSON_EXE`.
 
 ### 8. Install FARSITE SDK
 
-The FARSITE SDK (`FB/`) is not included in this repository.  Obtain
+The FARSITE SDK is not included in this repository.  Obtain
 `TestFARSITE.exe` and its supporting files from Missoula Fire Sciences Lab and
 place them at the path configured in `pipelineConfig.FARSITE_FB_DIR`.
 The expected layout is:
 
 ```
-FB/
+inputs/FB/
 ├── bin/
 │   ├── TestFARSITE.exe
 │   ├── gdal-data/
@@ -250,15 +255,13 @@ All input data lives under `inputs/` and is not version-controlled (listed in
 
 ### OSM road and waterway barriers
 
-Pre-processed OpenStreetMap extracts in GeoPackage / shapefile format:
-
 | File | Contents | Config key |
 |------|----------|------------|
-| `inputs/barriers/us_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
-| `inputs/barriers/waterways.gpkg` | OSM waterways (layer `lines`, field `waterway`) | `WATER_GPKG` |
-| `inputs/barriers/us_rivers.shp` | Backup river shapefile for areas with poor OSM coverage | `BACKUP_WATER_SHP` |
+| `inputs/barriers/osm_conus_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
+| `inputs/barriers/grwl.gpkg` | Global River Widths from Landsat (layer `lines`, field `waterway`) | `WATER_GPKG` |
+| `inputs/barriers/osm_conus_rivers.gpkg` | Backup river polygons for areas with poor GRWL coverage | `BACKUP_WATER_GPKG` |
 
-Road/waterway GeoPackages can be extracted from a US OSM `.pbf` file using
+Road GeoPackages can be extracted from a US OSM `.pbf` file using
 `osmium` + `ogr2ogr`, or downloaded from [GeoFabrik](https://download.geofabrik.de/).
 
 ### LANDFIRE (downloaded automatically)
@@ -273,16 +276,16 @@ only a valid `LANDFIRE_EMAIL` registered at [USGS LFPS](https://lfps.usgs.gov).
 Data/
 ├── inputs/
 │   ├── perimeters/
-│   │   └── mtbs_perims_DD.shp   (+ .dbf, .prj, .shx, …)
+│   │   └── mtbs_perimeters.shp   (+ sidecar files)
 │   ├── satellites/
-│   │   └── clipped.gpkg
+│   │   └── nasa_lance_allSatellites.gpkg
 │   ├── barriers/
-│   │   ├── us_roads.gpkg
-│   │   ├── waterways.gpkg
-│   │   └── us_rivers.shp        (+ .dbf, .prj, .shx)
-│   └── usfs_fire_points.geojson
-├── FB/                           (FARSITE SDK — see WSL setup above)
-│   └── bin/TestFARSITE.exe
+│   │   ├── osm_conus_roads.gpkg
+│   │   ├── grwl.gpkg
+│   │   └── osm_conus_rivers.gpkg
+│   ├── usfs_fire_points.geojson
+│   └── FB/                       (FARSITE SDK — see WSL setup above)
+│       └── bin/TestFARSITE.exe
 └── nelson_csharp/                (built from source — see WSL setup above)
 ```
 

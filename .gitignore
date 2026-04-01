@@ -3,5 +3,4 @@ __pycache__/
 
 # Input data (large files, not version-controlled)
 inputs/
-FB/
 nelson_csharp/
