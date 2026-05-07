@@ -45,7 +45,7 @@ Data/
 │   ├── createElmfireInputFiles.py     ← step 8:  write ELMFIRE namelist (.data)
 │   ├── prepareFarsite.py              ← step 9:  create FARSITE inputs (LCP, etc.)
 │   ├── runElmfireCase.py              ← step 10: execute ELMFIRE
-│   ├── runFarsiteCase.py              ← step 11: execute FARSITE via Wine
+│   ├── runFarsiteCase.py              ← step 11: execute FARSITE (Linux native)
 │   └── farsiteWindToGeotiff.py       ← step 12: extract ws/wd from FARSITE winds
 │                                         (only when WINDNINJA_SOURCE=farsite)
 
@@ -66,16 +66,12 @@ Data/
 # Data directories
 # Input data (not version-controlled — see Input data requirements below)
 ├── inputs/
-│   ├── perimeters/
-│   │   └── mtbs_perimeters.shp        ← MTBS burn perimeters
-│   ├── satellites/
-│   │   └── nasa_lance_allSatellites.gpkg  ← VIIRS/MODIS/Landsat hotspot detections
-│   ├── barriers/
-│   │   ├── osm_conus_roads.gpkg       ← OSM road network
-│   │   ├── grwl.gpkg                  ← Global River Widths from Landsat waterways
-│   │   └── osm_conus_rivers.gpkg      ← Backup river polygons
-│   ├── usfs_fire_points.geojson       ← USFS fire occurrence points
-│   └── FB/                            ← FARSITE SDK (bin/TestFARSITE.exe, etc.)
+│   ├── mtbs_perimeters.gpkg           ← MTBS burn perimeters
+│   ├── NIFC_FOD.gpkg                  ← NIFC fire occurrence points
+│   ├── nasa_lance_allSatellites.gpkg  ← VIIRS/MODIS/Landsat hotspot detections
+│   ├── osm_conus_roads.gpkg           ← OSM road network
+│   ├── grwl.gpkg                      ← Global River Widths from Landsat waterways
+│   └── osm_conus_rivers.gpkg          ← Backup river polygons
 └── nelson_csharp/                     ← Nelson dead-fuel model (C# source + binary)
 ```
 
@@ -91,8 +87,7 @@ Data/
 | GDAL CLI (`gdal_translate`, `gdalbuildvrt`, `ogr2ogr`) | on `$PATH` |
 | WindNinja CLI (`WindNinja_cli`) | conda env (see `WINDNINJA_CONDA_ENV`) |
 | ELMFIRE executable (`elmfire`) | on `$PATH` |
-| FARSITE SDK (`TestFARSITE.exe`) | `pipelineConfig.FARSITE_FB_DIR` |
-| Wine (for running FARSITE on Linux/WSL) | on `$PATH` |
+| FARSITE Linux binary (`TestFARSITE`) | `pipelineConfig.FARSITE_FB_DIR` |
 | Nelson C# model | `pipelineConfig.NELSON_EXE` |
 | LFPS API access (USGS email) | `LFPS_EMAIL` environment variable |
 | OpenMeteo ERA5 (free, no key) | `pipelineConfig.OPENMETEO_URL` |
@@ -102,8 +97,8 @@ Data/
 ## WSL setup
 
 This pipeline is designed to run inside **Windows Subsystem for Linux (WSL2)**
-with Ubuntu 24.04.  FARSITE runs as a Windows `.exe` via Wine so both Linux
-and Windows tooling are available in the same environment.
+with Ubuntu 24.04.  FARSITE runs as a natively compiled Linux executable so
+Wine is not required.
 
 ### 1. Enable WSL2
 
@@ -162,22 +157,24 @@ No need to install the GUI version.
 Set `WINDNINJA_CONDA_ENV` in `pipelineConfig.py` to the environment name that
 has `WindNinja_cli` on its PATH (default `"base"`).
 
-### 6. Install Wine (for FARSITE)
+### 6. Build or install the native Linux FARSITE binary
 
-```bash
-sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install -y wine wine32 wine64 libwine libwine:i386 fonts-wine
+The pipeline now runs FARSITE as a natively compiled Linux executable — Wine
+is no longer required.  Obtain or build the `TestFARSITE` Linux binary and
+place it in any directory on the machine (e.g. `/home/<user>/farsite/src/`).
+
+Set `FARSITE_FB_DIR` in `pipelineConfig.py` to that directory and
+`FARSITE_EXE_NAME` to the executable filename:
+
+```python
+FARSITE_FB_DIR   = Path("/home/<user>/farsite/src")
+FARSITE_EXE_NAME = "TestFARSITE"
 ```
 
 Verify:
 ```bash
-wine --version   # should print wine-x.x.x
+/home/<user>/farsite/src/TestFARSITE --help
 ```
-
-On first use Wine will initialise its prefix (`.wine/`) automatically.
-No further Wine configuration is needed — the pipeline sets all required
-environment variables (`GDAL_DATA`, `PROJ_LIB`, `WINEDEBUG`) at runtime.
 
 ### 7. Clone and configure
 
@@ -204,28 +201,19 @@ dotnet publish -c Release
 ```
 The compiled binary path is set automatically by `pipelineConfig.NELSON_EXE`.
 
-### 9. Download FARSITE Command Line Tools
+### 9. Obtain the native Linux FARSITE binary
 
-The FARSITE command line tool is not included in this repository.  Obtain
-`TestFARSITE.exe` and its supporting files from Missoula Fire Sciences Lab 
-in https://www.alturassolutions.com/FB/FB_API.htm and
-place them at the path configured in `pipelineConfig.FARSITE_FB_DIR`.
-The expected layout is:
-
-```
-inputs/FB/
-├── bin/
-│   ├── TestFARSITE.exe
-│   ├── gdal-data/
-│   └── proj9/share/
-└── setenv.bat
-```
+The FARSITE Linux binary is not included in this repository.  Place the
+compiled `TestFARSITE` executable in any directory (e.g.
+`/home/<user>/farsite/src/`).  No Wine SDK layout is required — only the
+single binary needs to be present at the path pointed to by `FARSITE_FB_DIR`.
 
 Edit `pipelineConfig.py` — at minimum update:
 
 ```python
-BASE_VALIDATION  = Path("/home/<user>/elmfire_validation/")
-WINDNINJA_SOURCE = "install"           # or "farsite"
+BASE_VALIDATION  = Path("/home/<user>/elmfire/elmfire_validation/")
+FARSITE_FB_DIR   = Path("/home/<user>/farsite/src")   # dir containing TestFARSITE
+WINDNINJA_SOURCE = "install"                           # or "farsite"
 ```
 
 `LANDFIRE_EMAIL` is read from the `LFPS_EMAIL` environment variable (not stored
@@ -247,28 +235,29 @@ All input data lives under `inputs/` and is not version-controlled (listed in
 ### MTBS burn perimeters
 
 - **Source**: [MTBS Data Access](https://www.mtbs.gov/direct-download)
-- **Place at**: `inputs/perimeters/mtbs_perimeters.shp` (+ sidecar files)
+- **Place at**: `inputs/mtbs_perimeters.gpkg`
 
-### USFS fire occurrence points
+### NIFC fire occurrence points
 
-- **Source**: [USFS ArcGIS Feature Service](https://www.fs.usda.gov/rds/archive/catalog/RDS-2013-0009.5) — download as GeoJSON and rename:
-- **Place at**: `inputs/usfs_fire_points.geojson`
+- **Source**: [NIFC Fire Occurrence Database (FOD)](https://data-nifc.opendata.arcgis.com/) — download as GeoPackage
+- **Place at**: `inputs/NIFC_FOD.gpkg`
+- Required fields: `IncidentName`, `FireDiscoveryDateTime`, `FireOutDateTime`
 
 ### VIIRS / MODIS satellite hotspot detections
 
 - **Source**: [NASA FIRMS archive](https://firms.modaps.eosdis.nasa.gov/download/) (VIIRS/MODIS active fire detections for the US)
-  Login with your email to download the CONUS dataset. 
+  Login with your email to download the CONUS dataset.
 - Merge all downloaded shapefiles into a single GeoPackage with layer `output`.
   Required columns: `ACQ_DATE` (date), `ACQ_TIME` (HHMM string), plus geometry.
-- **Place at**: `inputs/satellites/nasa_lance_allSatellites.gpkg`
+- **Place at**: `inputs/nasa_lance_allSatellites.gpkg`
 
 ### OSM road and waterway barriers
 
 | File | Contents | Config key |
 |------|----------|------------|
-| `inputs/barriers/osm_conus_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
-| `inputs/barriers/grwl.gpkg` | Global River Widths from Landsat (layer `lines`, field `waterway`) | `WATER_GPKG` |
-| `inputs/barriers/osm_conus_rivers.gpkg` | Backup river polygons for areas with poor GRWL coverage | `BACKUP_WATER_GPKG` |
+| `inputs/osm_conus_roads.gpkg` | US road network (layer `lines`, field `highway`) | `ROADS_GPKG` |
+| `inputs/grwl.gpkg` | Global River Widths from Landsat (layer `lines`, field `waterway`) | `WATER_GPKG` |
+| `inputs/osm_conus_rivers.gpkg` | Backup river polygons for areas with poor GRWL coverage | `BACKUP_WATER_GPKG` |
 
 Road GeoPackages can be extracted from a US OSM `.pbf` file using
 `osmium` + `ogr2ogr`, or downloaded from [GeoFabrik](https://download.geofabrik.de/).
@@ -285,18 +274,16 @@ only a valid email registered at [USGS LFPS](https://lfps.usgs.gov), set via the
 ```
 Data/
 ├── inputs/
-│   ├── perimeters/
-│   │   └── mtbs_perimeters.shp   (+ sidecar files)
-│   ├── satellites/
-│   │   └── nasa_lance_allSatellites.gpkg
-│   ├── barriers/
-│   │   ├── osm_conus_roads.gpkg
-│   │   ├── grwl.gpkg
-│   │   └── osm_conus_rivers.gpkg
-│   ├── usfs_fire_points.geojson
-│   └── FB/                       (FARSITE SDK — see WSL setup above)
-│       └── bin/TestFARSITE.exe
+│   ├── mtbs_perimeters.gpkg
+│   ├── NIFC_FOD.gpkg
+│   ├── nasa_lance_allSatellites.gpkg
+│   ├── osm_conus_roads.gpkg
+│   ├── grwl.gpkg
+│   └── osm_conus_rivers.gpkg
 └── nelson_csharp/                (built from source — see WSL setup above)
+
+# FARSITE binary lives outside this repo (see WSL setup step 6 / 9):
+/home/<user>/farsite/src/TestFARSITE
 ```
 
 ---
@@ -309,14 +296,14 @@ Edit the **User-modifiable parameters** and **Paths** sections:
 
 ```python
 # Paths
-BASE_VALIDATION      = Path("/your/network/share/autoValidate/")
+BASE_VALIDATION      = Path("/home/<user>/elmfire/elmfire_validation/")
 FIRE_ROOT            = Path("/scratch/yourname/FirePairs")
-FARSITE_FB_DIR       = Path("/path/to/FB")        # FARSITE SDK root
+FARSITE_FB_DIR       = Path("/home/<user>/farsite/src")   # dir with TestFARSITE binary
 
 # User parameters
-MIN_FIRE_YEAR        = 2023
+MIN_FIRE_YEAR        = 2024
 MAX_FIRE_YEAR        = 2025
-MAX_PARALLEL_CASES   = 12
+MAX_PARALLEL_CASES   = 14
 
 # Wind source: "install" = WindNinja, "farsite" = derive winds from FARSITE output
 WINDNINJA_SOURCE     = "install"
@@ -386,7 +373,7 @@ Step 7   getBarrierFile                 →  inputs/barrier.tif
 Step 8   createElmfireInputFiles        →  <case>.data
 Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
 Step 10  runElmfireCase                 →  outputs/time_of_arrival_*.tif
-Step 11  runFarsiteCase                 →  farsite/outputs/farsite_Arrival Time.tif
+Step 11  runFarsiteCase                 →  farsite/outputs/farsite_ArrivalTime.asc
 ```
 
 #### `WINDNINJA_SOURCE = "farsite"`
@@ -401,7 +388,7 @@ Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
 Step 7   getBarrierFile                 →  inputs/barrier.tif
 Step 8   createElmfireInputFiles        →  <case>.data
 Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
-Step 10  runFarsiteCase                 →  farsite/outputs/farsite_Arrival Time.tif
+Step 10  runFarsiteCase                 →  farsite/outputs/farsite_ArrivalTime.asc
                                             farsite/outputs/farsite_WindGrids.tif
 Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE wind grids)
                                             deletes farsite_WindGrids.tif after extraction
@@ -441,17 +428,18 @@ python cleanPipelineOutputs.py --include-wind-tifs      # also delete ws/wd.tif
 
 ---
 
-## FARSITE execution (Wine / WSL)
+## FARSITE execution (native Linux)
 
-FARSITE runs as a Windows executable (`TestFARSITE.exe`) via Wine on Linux/WSL.
-`runFarsiteCase.py` handles path translation (`/home/…` → `Z:\home\…`),
-sets the required GDAL/PROJ environment variables, and verifies the sentinel
-output (`farsite_Arrival Time.tif`) after the run.
+FARSITE runs as a natively compiled Linux executable (`TestFARSITE`).
+Wine is not required.  `runFarsiteCase.py` writes a plain-text command file
+(`farsite_linux.txt`) with absolute Linux paths and invokes the binary directly.
+The completion sentinel is `farsite_ArrivalTime.asc`; the script verifies this
+file exists after the run.
 
 After a successful FARSITE run, outputs are cleaned automatically:
-- **`WINDNINJA_SOURCE = "install"`**: keeps only `farsite_Arrival Time.tif`;
+- **`WINDNINJA_SOURCE = "install"`**: keeps only `farsite_ArrivalTime.asc`;
   deletes all other FARSITE outputs including `farsite_WindGrids.tif`.
-- **`WINDNINJA_SOURCE = "farsite"`**: keeps `farsite_Arrival Time.tif` +
+- **`WINDNINJA_SOURCE = "farsite"`**: keeps `farsite_ArrivalTime.asc` +
   `farsite_WindGrids.tif` until `farsiteWindToGeotiff.py` has extracted
   `ws.tif`/`wd.tif`, then deletes `farsite_WindGrids.tif` too.
 
@@ -490,11 +478,11 @@ After a successful FARSITE run, outputs are cleaned automatically:
 ├── farsite/
 │   ├── landscape.lcp                    FARSITE landscape file (converted from LANDFIRE)
 │   ├── farsite.input                    FARSITE control file
-│   ├── farsite_wine.txt                 Wine command-line (auto-generated)
+│   ├── farsite_linux.txt                command-line args file (auto-generated)
 │   ├── ignition.shp                     reprojected ignition point
 │   ├── barrier.shp                      merged barrier polygons (optional)
 │   └── outputs/
-│       └── farsite_Arrival Time.tif     FARSITE time-of-arrival output (sentinel)
+│       └── farsite_ArrivalTime.asc      FARSITE time-of-arrival output (sentinel)
 ├── outputs/
 │   └── time_of_arrival_<HH>.tif         ELMFIRE TOA raster
 └── scratch/                             ELMFIRE working directory
@@ -518,7 +506,7 @@ All settings are documented inline in `pipelineConfig.py`.
 | 8. Weather | OpenMeteo URL and model |
 | 9. WindNinja | exe, model type, chunk size, output height, mesh resolution factor |
 | 10. ELMFIRE | exe, GDAL path, simulation parameters, moisture content |
-| 11. FARSITE | `FARSITE_FB_DIR`, `FARSITE_EXE_NAME` |
+| 11. FARSITE | `FARSITE_FB_DIR` (dir with Linux binary), `FARSITE_EXE_NAME` |
 | 12. Barrier | road/water widths, OSM field names |
 | 13. LFPS API | base URL, product list, poll parameters |
 | 14. Nelson | path to C# executable |
@@ -539,11 +527,10 @@ All settings are documented inline in `pipelineConfig.py`.
 - Check `inputs/windninja/chunk_000/windninja_cli.log` for the error message.
 - Ensure the DEM covers the full fire domain.
 
-### FARSITE fails (Wine)
-- Confirm Wine is installed: `wine --version`.
-- Confirm `FARSITE_FB_DIR` points to the SDK root containing `bin/TestFARSITE.exe`.
-- Check `farsite/pipeline.log` for Wine error output.
-- Run `wine TestFARSITE.exe` interactively to test the Wine prefix.
+### FARSITE fails
+- Confirm `FARSITE_FB_DIR` points to the directory containing `TestFARSITE` and that the binary is executable: `ls -l $FARSITE_FB_DIR/TestFARSITE`.
+- Check `farsite/pipeline.log` for error output.
+- Run the binary interactively with the generated `farsite_linux.txt` to test: `<FARSITE_FB_DIR>/TestFARSITE farsite/farsite_linux.txt`.
 
 ### ELMFIRE fails
 - Confirm `ELMFIRE_EXE` is on PATH: `which elmfire`.
