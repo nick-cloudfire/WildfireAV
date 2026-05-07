@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 11 of runPipelineParallel: execute FARSITE via Wine for one case.
+Step 11 of runPipelineParallel: execute FARSITE (Linux native) for one case.
 
 Prerequisites (produced by step 9 – prepareFarsite):
     <case_dir>/farsite/farsite.input
@@ -11,11 +11,9 @@ Prerequisites (produced by step 9 – prepareFarsite):
 
 What this script does
 ---------------------
-1.  Converts all required paths to Wine Windows paths  (Z:\...)
-2.  Writes  <case_dir>/farsite/farsite_wine.txt  with one absolute-path command line
-3.  Sets GDAL_DATA and PROJ_LIB to the Wine equivalents of the SDK's data dirs
-4.  Runs  wine <FB_BIN>/TestFARSITE.exe farsite_wine.txt
-5.  Skips the case when  <outputs>/farsite_Arrival Time.tif  already exists.
+1.  Writes  <case_dir>/farsite/farsite_linux.txt  with one absolute-path command line
+2.  Runs  <FARSITE_EXE> farsite_linux.txt
+3.  Skips the case when  <outputs>/farsite_ArrivalTime.asc  already exists.
 
 Standalone usage (process all cases under FIRE_ROOT):
     python runFarsiteCase.py
@@ -23,9 +21,6 @@ Standalone usage (process all cases under FIRE_ROOT):
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pipelineConfig as cfg
@@ -36,20 +31,9 @@ from parallel_api import run_subprocess
 # ---------------------------------------------------------------------------
 
 FIRE_ROOT    = Path(cfg.FIRE_ROOT)
-FB_BIN       = Path(cfg.FARSITE_FB_DIR) / "bin"
-FARSITE_EXE  = FB_BIN / cfg.FARSITE_EXE_NAME
+FARSITE_EXE  = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
 
-ARRIVAL_TIME_TIF = "farsite_Arrival Time.tif"   # completion sentinel
-WIND_GRIDS_TIF   = "farsite_WindGrids.tif"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _to_wine_path(linux_path: Path) -> str:
-    """Convert an absolute Linux path to a Wine Z:\\ Windows path."""
-    return "Z:\\" + str(linux_path.absolute()).replace("/", "\\")
+ARRIVAL_TIME_ASC = "farsite_ArrivalTime.asc"   # completion sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -57,11 +41,11 @@ def _to_wine_path(linux_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def run_farsite(case_dir: Path) -> None:
-    """Run FARSITE via Wine for *case_dir*.  Skips if outputs already exist."""
+    """Run FARSITE for *case_dir*.  Skips if outputs already exist."""
     case_dir    = Path(case_dir).absolute()
     farsite_dir = case_dir / "farsite"
     outputs_dir = farsite_dir / "outputs"
-    sentinel    = outputs_dir / ARRIVAL_TIME_TIF
+    sentinel    = outputs_dir / ARRIVAL_TIME_ASC
 
     if sentinel.exists():
         print(f"  Skipped — FARSITE outputs already exist.")
@@ -74,52 +58,39 @@ def run_farsite(case_dir: Path) -> None:
             "Run prepareFarsite (step 9) first."
         )
 
-    # ---- build Wine-path command line -----------------------------------
+    # ---- build command file ---------------------------------------------
     barrier_shp = farsite_dir / "barrier.shp"
-    barrier_arg = _to_wine_path(barrier_shp) if barrier_shp.exists() else "0"
+    barrier_arg = str(barrier_shp) if barrier_shp.exists() else "0"
 
     cmd_line = " ".join([
-        _to_wine_path(farsite_dir / "landscape.lcp"),
-        _to_wine_path(farsite_dir / "farsite.input"),
-        _to_wine_path(farsite_dir / "ignition.shp"),
+        str(farsite_dir / "landscape.lcp"),
+        str(farsite_dir / "farsite.input"),
+        str(farsite_dir / "ignition.shp"),
         barrier_arg,
-        _to_wine_path(outputs_dir / "farsite"),   # output base name (no extension)
-        "2",                                       # output type: GeoTIFF
+        str(outputs_dir / "farsite"),   # output base name (no extension)
+        "1",                             # output type: ASCII grid (.asc)
     ])
 
-    wine_cmd_file = farsite_dir / "farsite_wine.txt"
-    wine_cmd_file.write_text(cmd_line + "\n")
-
-    # ---- Wine environment -----------------------------------------------
-    env = os.environ.copy()
-    env["GDAL_DATA"] = _to_wine_path(FB_BIN / "gdal-data")
-    env["PROJ_LIB"]  = _to_wine_path(FB_BIN / "proj9" / "share")
-    env["WINEDEBUG"] = "-all"   # suppress Wine internals noise
+    cmd_file = farsite_dir / "farsite_linux.txt"
+    cmd_file.write_text(cmd_line + "\n")
 
     # ---- run ------------------------------------------------------------
-    print(f"  Running: wine {FARSITE_EXE.name} farsite_wine.txt")
+    print(f"  Running: {FARSITE_EXE.name} farsite_linux.txt")
     run_subprocess(
-        ["wine", str(FARSITE_EXE), str(wine_cmd_file)],
+        [str(FARSITE_EXE), str(cmd_file)],
         cwd=str(farsite_dir),
-        env=env,
     )
 
     if sentinel.exists():
         print(f"  FARSITE complete — outputs in {outputs_dir}")
     else:
         raise RuntimeError(
-            f"FARSITE finished but '{ARRIVAL_TIME_TIF}' was not created. "
-            "Check the Wine output above for errors."
+            f"FARSITE finished but '{ARRIVAL_TIME_ASC}' was not created. "
+            "Check the output above for errors."
         )
 
     # ---- clean up outputs -----------------------------------------------
-    # Always keep the arrival-time sentinel.
-    # Keep WindGrids only when farsiteWindToGeotiff will need them later
-    # (WINDNINJA_SOURCE == "farsite").  In "install" mode WindNinja already
-    # produced ws.tif/wd.tif so WindGrids are not needed.
-    keep = {ARRIVAL_TIME_TIF}
-    if cfg.WINDNINJA_SOURCE == "farsite":
-        keep.add(WIND_GRIDS_TIF)
+    keep = {ARRIVAL_TIME_ASC}
 
     removed = 0
     for f in outputs_dir.iterdir():

@@ -37,36 +37,43 @@ REFRESH_SECONDS = 10
 # Step metadata — must match the print() calls in runPipelineParallel.py
 # ---------------------------------------------------------------------------
 
-STEPS: dict[int, str] = {
-    1:  "download_landfire",
-    2:  "split_landfire_bands",
-    3:  "make_adj_phi",
-    4:  "download_weather_wxs",
-    5:  "windninja",
-    6:  "apply_nelson_model",
-    7:  "create_barrier_file",
-    8:  "create_elmfire_input_files",
-    9:  "prepare_farsite",
-    10: "run_farsite / run_elmfire",
-    11: "farsite_wind_to_geotiff / run_farsite",
-    12: "run_elmfire",
+# Steps 1-9 are the same regardless of wind source.
+# Steps 10+ differ between "farsite" and "install" modes — built at import time
+# from cfg.WINDNINJA_SOURCE so the table always matches the active config.
+
+_STEPS_COMMON: dict[int, tuple[str, str]] = {
+    # num: (full_name, short_name)
+    1: ("download_landfire",          "landfire"),
+    2: ("split_landfire_bands",       "split bands"),
+    3: ("make_adj_phi",               "phi / adj"),
+    4: ("download_weather_wxs",       "weather"),
+    5: ("windninja",                  "windninja"),
+    6: ("apply_nelson_model",         "nelson"),
+    7: ("create_barrier_file",        "barrier"),
+    8: ("create_elmfire_input_files", "elm inputs"),
+    9: ("prepare_farsite",            "prep farsite"),
 }
 
-STEP_SHORT: dict[int, str] = {
-    1:  "landfire",
-    2:  "split bands",
-    3:  "phi / adj",
-    4:  "weather",
-    5:  "windninja",
-    6:  "nelson",
-    7:  "barrier",
-    8:  "elm inputs",
-    9:  "prep farsite",
-    10: "farsite/elmfire",
-    11: "wind→tif/farsite",
-    12: "elmfire",
+# farsite mode: FARSITE runs first (wind source), then wind→tif, then ELMFIRE
+_STEPS_FARSITE: dict[int, tuple[str, str]] = {
+    10: ("run_farsite",              "run farsite"),
+    11: ("farsite_wind_to_geotiff",  "wind → tif"),
+    12: ("run_elmfire",              "elmfire"),
 }
 
+# install mode: ELMFIRE runs first, then FARSITE (validation only)
+_STEPS_INSTALL: dict[int, tuple[str, str]] = {
+    10: ("run_elmfire",  "elmfire"),
+    11: ("run_farsite",  "run farsite"),
+}
+
+_mode_steps = (
+    _STEPS_FARSITE if cfg.WINDNINJA_SOURCE == "farsite" else _STEPS_INSTALL
+)
+_all_steps = {**_STEPS_COMMON, **_mode_steps}
+
+STEPS:      dict[int, str] = {k: v[0] for k, v in _all_steps.items()}
+STEP_SHORT: dict[int, str] = {k: v[1] for k, v in _all_steps.items()}
 MAX_STEP = max(STEPS)
 
 # ---------------------------------------------------------------------------

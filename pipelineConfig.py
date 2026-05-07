@@ -30,31 +30,31 @@ from pathlib import Path
 # 1. USER-MODIFIABLE PARAMETERS
 # =============================================================================
 
-MTBS_AREA_THRESHOLD_ACRES   = 3000      # minimum burn area to include (acres)
-MIN_FIRE_YEAR               = 2023      # earliest fire year to process
+MTBS_AREA_THRESHOLD_ACRES   = 5000      # minimum burn area to include (acres)
+MIN_FIRE_YEAR               = 2024      # earliest fire year to process
 MAX_FIRE_YEAR               = 2025      # latest  fire year to process
 DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
 EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE download
 LANDFIRE_EMAIL              = os.environ["LFPS_EMAIL"]  # set in shell: export LFPS_EMAIL=you@example.com
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
-SETUP_PIPELINE_MAX_WORKERS  = 8         # parallel workers for getSatelliteEndTimes
+SETUP_PIPELINE_MAX_WORKERS  = 12         # parallel workers for getSatelliteEndTimes
 MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
-WINDNINJA_SOURCE            = "farsite"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
+WINDNINJA_SOURCE            = "install"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
 
 # =============================================================================
 # 2. PATHS
 # =============================================================================
 
-BASE_VALIDATION         = Path(r"/home/nick/elmfire_validation/")
+BASE_VALIDATION         = Path(r"/home/nick/elmfire/elmfire_validation/")
 BASE_DATA               = BASE_VALIDATION / "Data"
 FIRE_ROOT_LOGIN_NODE    = BASE_VALIDATION / "FirePairs"   # setup output (login node)
 FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FirePairs"  # HPC scratch location
 INPUTS_DATA_ROOT        = BASE_DATA / "inputs"
-PERIMETER_DATA_ROOT     = INPUTS_DATA_ROOT / "perimeters"
-SATELLITES_ROOT         = INPUTS_DATA_ROOT / "satellites"
-FARSITE_FB_DIR          = INPUTS_DATA_ROOT / "FB"   # root of the FireBehavior SDK folder
-FARSITE_EXE_NAME        = "TestFARSITE.exe"         # executable name inside FB/bin/
+PERIMETER_DATA_ROOT     = INPUTS_DATA_ROOT
+SATELLITES_ROOT         = INPUTS_DATA_ROOT
+FARSITE_FB_DIR          = Path("/home/nick/farsite/src")  # Linux FARSITE binary directory
+FARSITE_EXE_NAME        = "TestFARSITE"                   # Linux executable name
 
 # =============================================================================
 # 3. FILE / DIRECTORY NAMES
@@ -95,8 +95,8 @@ WS_WD_END_COL           = COL_SATELLITE_END
 # 5. MTBS PERIMETERS & USFS IGNITION POINTS
 # =============================================================================
 
-MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perimeters.shp"
-USFS_POINTS_RAW             = INPUTS_DATA_ROOT / "usfs_fire_points.geojson"
+MTBS_PERIMS_RAW             = PERIMETER_DATA_ROOT / "mtbs_perimeters.gpkg"
+USFS_POINTS_RAW             = INPUTS_DATA_ROOT / "NIFC_FOD.gpkg"
 
 # These intermediate files are written to / read from FIRE_ROOT_LOGIN_NODE
 MTBS_PERIMS_WITH_IGNITIONS  = FIRE_ROOT_LOGIN_NODE / "perimeters_ignitions.gpkg"
@@ -105,9 +105,9 @@ USFS_POINTS_MATCHED         = FIRE_ROOT_LOGIN_NODE / "all_ignitions.gpkg"
 MTBS_ACRES_FIELD    = "BurnBndAc"
 PERIM_NAME_FIELD    = "Incid_Name"
 PERIM_DATE_FIELD    = "Ig_Date"         # polygon ignition date (date field in shapefile)
-POINT_NAME_FIELD    = "FIRENAME"
-POINT_DISC_FIELD    = "DISCOVERYDATETIME"
-POINT_OUT_FIELD     = "FIREOUTDATETIME"
+POINT_NAME_FIELD    = "IncidentName"
+POINT_DISC_FIELD    = "FireDiscoveryDateTime"
+POINT_OUT_FIELD     = "FireOutDateTime"
 
 # =============================================================================
 # 6. LANDFIRE DOWNLOAD & SPLITTING
@@ -171,8 +171,8 @@ WINDNINJA_CONDA_ENV         = "base"                # conda environment with Win
 WINDNINJA_WX_MODEL_TYPE     = "PASTCAST-GCP-HRRR-CONUS-3-KM"
 WINDNINJA_TIME_ZONE         = "UTC"
 WINDNINJA_MESH_UNITS        = "m"
-WINDNINJA_OUTPUT_HEIGHT     = 10.0                  # m above ground
-WINDNINJA_OUTPUT_HEIGHT_UNITS = "m"
+WINDNINJA_OUTPUT_HEIGHT     = 20.0                  # m above ground
+WINDNINJA_OUTPUT_HEIGHT_UNITS = "ft"
 WINDNINJA_MAX_WINDOW_DAYS   = 13    # WindNinja hard-fails above 14 days; 13 is safe
 WINDNINJA_MESH_RESOLUTION_FACTOR = 4  # mesh_resolution = cellsize * this factor
 WINDNINJA_NUM_THREADS       = 1     # CPU threads passed to WindNinja_cli (num_threads)
@@ -196,11 +196,11 @@ ELMFIRE_SCRATCH_SUBDIR  = "scratch"
 # 11. BARRIER FILE
 # =============================================================================
 
-ROADS_GPKG          = INPUTS_DATA_ROOT / "barriers" / "osm_conus_roads.gpkg"
+ROADS_GPKG          = INPUTS_DATA_ROOT /"osm_conus_roads.gpkg"
 ROADS_LAYER         = "lines"
-WATER_GPKG          = INPUTS_DATA_ROOT / "barriers" / "grwl.gpkg"
+WATER_GPKG          = INPUTS_DATA_ROOT / "grwl.gpkg"
 WATER_LAYER         = "lines"
-BACKUP_WATER_GPKG   = INPUTS_DATA_ROOT / "barriers" / "osm_conus_rivers.gpkg"
+BACKUP_WATER_GPKG   = INPUTS_DATA_ROOT / "osm_conus_rivers.gpkg"
 
 ROAD_CLASS_FIELD    = "highway"
 WATER_CLASS_FIELD   = "waterway"

@@ -118,14 +118,24 @@ def _submit_job(products: list[str], bbox: tuple, projection: int) -> str:
 
 
 def _poll_job(job_id: str, log=print) -> dict:
+    import requests as _requests
     t0 = time.monotonic()
     last_status = None
     last_queue_pos = None
     for _ in range(POLL_MAX_TRIES):
-        r = get_thread_session().get(
-            f"{BASE_API}/api/job/status", params={"JobId": job_id}, timeout=30
-        )
-        r.raise_for_status()
+        try:
+            r = get_thread_session().get(
+                f"{BASE_API}/api/job/status", params={"JobId": job_id}, timeout=30
+            )
+            r.raise_for_status()
+        except _requests.HTTPError as exc:
+            # Transient server-side errors (502, 503, 504) — keep polling
+            if exc.response is not None and exc.response.status_code in (502, 503, 504):
+                elapsed = int(time.monotonic() - t0)
+                log(f"  [{elapsed:4d}s] transient {exc.response.status_code}, retrying poll…")
+                time.sleep(POLL_SLEEP_S)
+                continue
+            raise
         js = r.json()
         status = js.get("status")
         queue_pos = js.get("queuePosition")

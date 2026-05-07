@@ -66,17 +66,25 @@ def main() -> pd.DataFrame:
         folder_name = row[COL_FOLDER]
         sat_ign = pd.to_datetime(row.get(COL_SAT_IGNITION), errors="coerce")
         sat_end = pd.to_datetime(row.get(COL_SAT_END),     errors="coerce")
-        valid = (
-            pd.notna(sat_ign)
-            and pd.notna(sat_end)
-            and (sat_end - sat_ign) >= pd.Timedelta(hours=MIN_HOURS)
-        )
+        if pd.isna(sat_ign):
+            reason = f"missing {COL_SAT_IGNITION}"
+        elif pd.isna(sat_end):
+            reason = f"missing {COL_SAT_END}"
+        else:
+            duration_h = (sat_end - sat_ign).total_seconds() / 3600
+            if duration_h < MIN_HOURS:
+                reason = f"duration {duration_h:.1f} h < {MIN_HOURS} h"
+            else:
+                reason = None
+        valid = reason is None
         keep_mask.append(valid)
         if not valid:
             folder = FIRE_ROOT / folder_name
             if folder.exists():
-                print(f"  Removing invalid case: {folder}")
+                print(f"  Removing {folder_name}: {reason}")
                 shutil.rmtree(folder)
+            else:
+                print(f"  Skipping {folder_name} (folder absent): {reason}")
 
     filtered = df.loc[keep_mask].copy().reset_index(drop=True)
     filtered.to_csv(INFO_CSV, index=False)

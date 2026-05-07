@@ -21,6 +21,7 @@ import re
 
 import geopandas as gpd
 import pandas as pd
+from tqdm import tqdm
 
 import pipelineConfig
 
@@ -165,7 +166,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4. Spatial filter: point must lie inside matched polygon
     # ------------------------------------------------------------------
-    merged_time["inside"] = merged_time.apply(_point_inside_polygon, axis=1)
+    tqdm.pandas(desc="Spatial filter", unit="pt")
+    merged_time["inside"] = merged_time.progress_apply(_point_inside_polygon, axis=1)
     merged_spatial = merged_time[merged_time["inside"]].copy()
 
     matched_pt_idxs = merged_spatial["pt_idx"].unique()

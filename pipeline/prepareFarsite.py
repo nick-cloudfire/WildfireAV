@@ -46,7 +46,6 @@ USE_BARRIER = True   # set False to omit barrier.shp from farsite.input
 
 LH_CONST    = 60
 LW_CONST    = 90
-M1000_CONST = 16
 DECIMALS    = 0
 
 # ---------------------------------------------------------------------------
@@ -241,7 +240,7 @@ def main(case_dir: Path) -> None:
     present   = np.where(counts > 0)[0]
     fms_lines = [
         f"{fuel} {m1_mn[fuel]:.{DECIMALS}f} {m10_mn[fuel]:.{DECIMALS}f} "
-        f"{m100_mn[fuel]:.{DECIMALS}f} {LH_CONST} {LW_CONST} {M1000_CONST}"
+        f"{m100_mn[fuel]:.{DECIMALS}f} {LH_CONST} {LW_CONST}"
         for fuel in present
     ]
     # prepend fuel-0 default (copy of first real class with code 0)

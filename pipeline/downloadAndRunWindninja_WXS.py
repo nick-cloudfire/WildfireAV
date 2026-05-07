@@ -109,9 +109,16 @@ def _read_wxs(wxs_path: Path) -> pd.DataFrame:
 def _wxs_window(wxs_df: pd.DataFrame,
                 start: dt.datetime,
                 stop: dt.datetime) -> pd.DataFrame:
-    """Return WXS rows that fall within [start, stop], snapped to hour boundaries."""
+    """Return WXS rows that fall within [start, stop], snapped to hour boundaries.
+
+    Both boundaries are floored to the hour.  The WXS file is always written
+    with records through ceil(end_time) = floor(end_time) + 1 h, so flooring
+    here drops that one extra record and makes the window length (= ws/wd band
+    count) equal to the number of bands the Nelson model produces from the same
+    WXS data (Nelson outputs N-1 bands from N post-conditioning records).
+    """
     start_hour = start.replace(minute=0, second=0, microsecond=0)
-    stop_hour  = (stop + dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    stop_hour  = stop.replace(minute=0, second=0, microsecond=0)
     window = wxs_df.loc[(wxs_df.index >= start_hour) & (wxs_df.index <= stop_hour)].copy()
     if window.empty:
         raise ValueError(f"No WXS records overlap {start} … {stop}")
@@ -174,6 +181,7 @@ def _build_cfg(
         units_ascii_out_resolution = m
         ascii_out_aaigrid          = true
         ascii_out_json             = false
+        write_farsite_atm          = true
     """).strip() + "\n"
 
 

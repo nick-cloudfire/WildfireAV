@@ -213,6 +213,7 @@ def _build_namelist(
     longitude: float,
     current_year: int,
     hour_of_year: int,
+    num_meteorology_times: int,
 ) -> str:
     lines = []
 
@@ -227,7 +228,7 @@ def _build_namelist(
     lines.append(f"LH_MOISTURE_CONTENT            = {LH_MC:.1f}")
     lines.append(f"LW_MOISTURE_CONTENT            = {LW_MC:.1f}")
     lines.append("USE_BARRIERS = .TRUE.")
-    lines.append("WS_AT_10M = .TRUE.")
+    lines.append("WS_AT_10M = .FALSE.")
     lines.append(f"BARRIER_FILENAME               = '{BARRIER_STEM}'")
     lines.append("/\n")
 
@@ -254,6 +255,9 @@ def _build_namelist(
     lines.append("DEBUG_LEVEL   = 0")
     lines.append("CLEAN_SCRATCH = .TRUE.")
     lines.append("/\n")
+
+    lines.append("&MONTE_CARLO")
+    lines.append(f"NUM_METEOROLOGY_TIMES = {num_meteorology_times:d}")
 
     lines.append("&MISCELLANEOUS")
     lines.append(f"PATH_TO_GDAL = '{PATH_TO_GDAL}'")
@@ -338,6 +342,10 @@ def _process_case(case_folder: Path, meta: dict) -> None:
     start_of_year = pd.Timestamp(year=current_year, month=1, day=1)
     hour_of_year  = int((start_dt - start_of_year).total_seconds() // 3600)
 
+    ws_path = inputs_dir / cfg.WS_TIF_NAME
+    with rasterio.open(ws_path) as ds:
+        num_meteorology_times = ds.count
+
     text = _build_namelist(
         epsg_str=epsg_str,
         cellsize=cellsize,
@@ -350,6 +358,7 @@ def _process_case(case_folder: Path, meta: dict) -> None:
         longitude=lon,
         current_year=current_year,
         hour_of_year=hour_of_year,
+        num_meteorology_times=num_meteorology_times,
     )
 
     out_path = case_folder / f"{folder_name}.data"

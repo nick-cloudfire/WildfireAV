@@ -96,15 +96,13 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
 
 def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
     """
-    Extend stack_tif to match reference_tif's (height, width) by repeating
-    edge pixels, then rewrite the file in place.
+    Resize stack_tif to exactly match reference_tif's (height, width), then
+    rewrite the file in place.
 
-    WindNinja coarsens its computation grid to a multiple of
-    WINDNINJA_MESH_RESOLUTION_FACTOR, so its ASCII output is typically 1-N
-    pixels shorter/narrower than the input landscape.  The lower-left corner
-    is always aligned (same origin), so any missing pixels are at the:
-      - top  (north) – prepend copies of the existing top row
-      - right (east) – append copies of the existing right column
+    The lower-left corner is always aligned (same origin), so any size
+    difference is at the north (top) and east (right) edges:
+      - stack smaller → pad by repeating the edge row/column
+      - stack larger  → crop the excess rows/columns
     """
     with rasterio.open(reference_tif) as ref:
         target_h, target_w = ref.height, ref.width
@@ -113,38 +111,44 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
         if src.height == target_h and src.width == target_w:
             return  # already the right size
 
-        missing_rows = target_h - src.height
-        missing_cols = target_w - src.width
-
-        if missing_rows < 0 or missing_cols < 0:
-            raise ValueError(
-                f"{stack_tif.name}: wind stack ({src.height}×{src.width}) is "
-                f"larger than reference ({target_h}×{target_w}); cannot pad."
-            )
+        delta_rows = target_h - src.height   # positive → need to pad, negative → need to crop
+        delta_cols = target_w - src.width
 
         data      = src.read()          # (bands, height, width)
         profile   = src.profile.copy()
         transform = src.transform
         cellsize  = abs(transform.e)
 
-    # Pad right edge (east): repeat last column
-    if missing_cols > 0:
+    # ---- east edge (columns) --------------------------------------------
+    if delta_cols > 0:
         data = np.concatenate(
-            [data, np.repeat(data[:, :, -1:], missing_cols, axis=2)],
+            [data, np.repeat(data[:, :, -1:], delta_cols, axis=2)],
             axis=2,
         )
+    elif delta_cols < 0:
+        data = data[:, :, :target_w]
 
-    # Pad top edge (north): repeat first row and shift the transform origin up
-    if missing_rows > 0:
+    # ---- north edge (rows) ----------------------------------------------
+    if delta_rows > 0:
         data = np.concatenate(
-            [np.repeat(data[:, 0:1, :], missing_rows, axis=1), data],
+            [np.repeat(data[:, 0:1, :], delta_rows, axis=1), data],
             axis=1,
         )
         transform = Affine(
             transform.a, transform.b, transform.c,
             transform.d, transform.e,
-            transform.f + missing_rows * cellsize,   # shift ymax north
+            transform.f + delta_rows * cellsize,   # shift ymax north
         )
+    elif delta_rows < 0:
+        data = data[:, -target_h:, :]   # keep the bottom target_h rows (south-aligned)
+        transform = Affine(
+            transform.a, transform.b, transform.c,
+            transform.d, transform.e,
+            transform.f + (-delta_rows) * transform.e,  # shift ymax south
+        )
+
+    action = "Padded" if (delta_rows >= 0 and delta_cols >= 0) else \
+             "Cropped" if (delta_rows <= 0 and delta_cols <= 0) else "Resized"
 
     profile.update(
         height=target_h, width=target_w, transform=transform,
@@ -154,8 +158,8 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
         dst.write(data)
 
     print(
-        f"  Padded {stack_tif.name}: "
-        f"+{missing_rows} row(s) north, +{missing_cols} col(s) east"
+        f"  {action} {stack_tif.name}: "
+        f"rows {delta_rows:+d} (north), cols {delta_cols:+d} (east)"
     )
 
 
