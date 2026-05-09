@@ -20,6 +20,7 @@ Or from the pipeline via main(case_dir).
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -27,6 +28,8 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.transform import Affine
+from rasterio.warp import reproject, Resampling as RioResampling
 
 import pipelineConfig as cfg
 
@@ -41,6 +44,9 @@ M10_FILENAME     = cfg.FMC_FILE_NAMES[1]
 M100_FILENAME    = cfg.FMC_FILE_NAMES[2]
 FBFM_FILENAME    = cfg.LANDFIRE_BAND_FILE_NAMES[3]
 INPUTS           = cfg.INPUTS_SUBDIR_NAME
+MESH_RES_FACTOR  = cfg.WINDNINJA_MESH_RESOLUTION_FACTOR
+WS_TIF_NAME      = cfg.WS_TIF_NAME
+WD_TIF_NAME      = cfg.WD_TIF_NAME
 
 USE_BARRIER = True   # set False to omit barrier.shp from farsite.input
 
@@ -85,6 +91,13 @@ def _parse_wxs_first_last_datetimes(wxs_lines):
         hhmm = parts[3].zfill(4)
         return datetime(y, m, d, int(hhmm[:2]), int(hhmm[2:]))
 
+    def _int_precip(line):
+        parts = line.split()
+        # field 6 (0-based) is HrlyPcp; FARSITE requires integer precipitation
+        parts[6] = str(int(round(float(parts[6]))))
+        return " ".join(parts)
+
+    data_lines = [_int_precip(ln) for ln in data_lines]
     return parse_dt(data_lines[0]), parse_dt(data_lines[-1]), data_lines
 
 
@@ -108,6 +121,89 @@ def _burn_period_lines(start_dt, end_dt):
     return lines
 
 
+def _write_asc(data: np.ndarray, cellsize: float, xllcorner: float, yllcorner: float,
+               out_path: Path) -> None:
+    """Write *data* as an ESRI ASCII raster compatible with FARSITE's ReadAsciiGrid."""
+    nrows, ncols = data.shape
+    # FARSITE rejects any negative value (treats them as nodata and aborts)
+    safe = np.clip(data, 0.0, None)
+    header = (
+        f"ncols {ncols}\n"
+        f"nrows {nrows}\n"
+        f"xllcorner {xllcorner:.6f}\n"
+        f"yllcorner {yllcorner:.6f}\n"
+        f"cellsize {cellsize:.6f}\n"
+        f"NODATA_value -9999"
+    )
+    np.savetxt(str(out_path), safe, header=header, comments="", fmt="%.4f")
+
+
+def _build_wind_grids(
+    ws_tif: Path, wd_tif: Path,
+    winds_dir: Path,
+    start_dt: datetime, end_dt: datetime,
+) -> list:
+    """Resample ws.tif/wd.tif bands to coarser ASC grids and return ATM entries.
+
+    Output resolution = source cellsize × MESH_RES_FACTOR (matches WindNinja mesh).
+    Returns list of (month, day, hhmm, ws_rel_str, wd_rel_str) tuples where
+    paths are relative to winds_dir.parent (i.e. farsite_dir).
+    """
+    winds_dir.mkdir(exist_ok=True)
+    farsite_dir = winds_dir.parent
+    entries = []
+
+    with rasterio.open(ws_tif) as ws_ds, rasterio.open(wd_tif) as wd_ds:
+        src_transform = ws_ds.transform
+        src_crs       = ws_ds.crs
+        cellsize_src  = abs(float(src_transform.a))
+        xllcorner     = float(src_transform.c)
+        ymax          = float(src_transform.f)
+
+        out_cellsize  = cellsize_src * MESH_RES_FACTOR
+        # Use ceil so output extent is >= source extent (CheckCoverage requirement)
+        out_width     = math.ceil(ws_ds.width  / MESH_RES_FACTOR)
+        out_height    = math.ceil(ws_ds.height / MESH_RES_FACTOR)
+        out_transform = Affine(out_cellsize, 0.0, xllcorner,
+                               0.0, -out_cellsize, ymax)
+        yllcorner     = ymax - out_height * out_cellsize
+
+        n_bands = ws_ds.count
+        print(f"  Wind grids: {n_bands} bands → {out_width}×{out_height} @ {out_cellsize:.0f}m")
+
+        for i in range(n_bands):
+            ts = start_dt + timedelta(hours=i)
+            if ts > end_dt:
+                break
+
+            ws_arr = np.zeros((out_height, out_width), dtype=np.float32)
+            reproject(
+                source=rasterio.band(ws_ds, i + 1), destination=ws_arr,
+                src_transform=src_transform, src_crs=src_crs,
+                dst_transform=out_transform,      dst_crs=src_crs,
+                resampling=RioResampling.bilinear,
+            )
+            wd_arr = np.zeros((out_height, out_width), dtype=np.float32)
+            reproject(
+                source=rasterio.band(wd_ds, i + 1), destination=wd_arr,
+                src_transform=src_transform, src_crs=src_crs,
+                dst_transform=out_transform,      dst_crs=src_crs,
+                resampling=RioResampling.nearest,
+            )
+
+            ws_asc = winds_dir / f"ws_{i:03d}.asc"
+            wd_asc = winds_dir / f"wd_{i:03d}.asc"
+            _write_asc(ws_arr, out_cellsize, xllcorner, yllcorner, ws_asc)
+            _write_asc(wd_arr, out_cellsize, xllcorner, yllcorner, wd_asc)
+
+            hhmm = ts.hour * 100 + ts.minute
+            entries.append((ts.month, ts.day, hhmm,
+                             str(ws_asc.relative_to(farsite_dir)),
+                             str(wd_asc.relative_to(farsite_dir))))
+
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -127,6 +223,8 @@ def main(case_dir: Path) -> None:
         case_dir / "LANDFIRE.tif",
         case_dir / "ignition_point.gpkg",
         case_dir / INPUTS / cfg.WXS_FILE_NAME,
+        case_dir / INPUTS / WS_TIF_NAME,
+        case_dir / INPUTS / WD_TIF_NAME,
         case_dir / INPUTS / (FBFM_FILENAME  + ".tif"),
         case_dir / INPUTS / (M1_FILENAME    + ".tif"),
         case_dir / INPUTS / (M10_FILENAME   + ".tif"),
@@ -175,10 +273,6 @@ def main(case_dir: Path) -> None:
     )
     prj_out.write_text(prj_text)
     print("  landscape.lcp + .prj")
-
-    with rasterio.open(landfire) as ds:
-        cellsize = ds.res[0]
-    gridded_winds_res = int(cellsize * cfg.WINDNINJA_MESH_RESOLUTION_FACTOR)
 
     # ---- ignition.shp --------------------------------------------------
     subprocess.run(
@@ -266,6 +360,20 @@ def main(case_dir: Path) -> None:
     start_dt, end_dt, wxs_data_lines    = _parse_wxs_first_last_datetimes(wxs_file_lines)
     burn_lines                          = _burn_period_lines(start_dt, end_dt)
 
+    # ---- wind grids (ATM file) -----------------------------------------
+    winds_dir   = farsite_dir / "winds"
+    atm_entries = _build_wind_grids(
+        case_dir / INPUTS / WS_TIF_NAME,
+        case_dir / INPUTS / WD_TIF_NAME,
+        winds_dir, start_dt, end_dt,
+    )
+    atm_path = winds_dir / "winds.atm"
+    with atm_path.open("w", newline="\n") as f:
+        f.write("ENGLISH\n")
+        for month, day, hhmm, ws_rel, wd_rel in atm_entries:
+            f.write(f"{month} {day} {hhmm} {ws_rel} {wd_rel}\n")
+    print(f"  winds.atm    ({len(atm_entries)} entries)")
+
     raws_elev       = next((ln for ln in wxs_file_lines if ln.startswith("RAWS_ELEVATION:")), "RAWS_ELEVATION: ")
     raws_units_raw  = next((ln for ln in wxs_file_lines if ln.startswith("RAWS_UNITS:")),     "RAWS_UNITS: ")
     pfx, _, val     = raws_units_raw.partition(":")
@@ -299,8 +407,7 @@ def main(case_dir: Path) -> None:
         "",
         "FOLIAR_MOISTURE_CONTENT: 100",
         "CROWN_FIRE_METHOD: Finney",
-        "GRIDDED_WINDS_GENERATE: Yes",
-        f"GRIDDED_WINDS_RESOLUTION: {gridded_winds_res}",
+        "FARSITE_ATM_FILE: winds/winds.atm",
         "",
     ]
     farsite_input.write_text("\n".join(content) + "\n")
