@@ -93,11 +93,8 @@ def _parse_wxs_first_last_datetimes(wxs_lines):
 
     def _int_precip(line):
         parts = line.split()
-        # FARSITE multiplies metric precipitation by 3.93 (bug: treats mm as cm),
-        # so values as low as 3 mm/hr exceed the internal 10.0 limit. Precipitation
-        # has no meaningful effect on fire spread when FMS data is provided, so
-        # zero it out to avoid the spurious rejection.
-        parts[6] = "0"
+        # field 6 (0-based) is HrlyPcp; FARSITE requires integer precipitation
+        parts[6] = str(int(round(float(parts[6]))))
         return " ".join(parts)
 
     data_lines = [_int_precip(ln) for ln in data_lines]
