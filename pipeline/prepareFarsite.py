@@ -93,8 +93,8 @@ def _parse_wxs_first_last_datetimes(wxs_lines):
 
     def _int_precip(line):
         parts = line.split()
-        # field 6 (0-based) is HrlyPcp; FARSITE requires integer precipitation
-        parts[6] = str(int(round(float(parts[6]))))
+        # field 6 (0-based) is HrlyPcp; FARSITE requires integer 0-10 (hard limit)
+        parts[6] = str(min(10, int(round(float(parts[6])))))
         return " ".join(parts)
 
     data_lines = [_int_precip(ln) for ln in data_lines]
