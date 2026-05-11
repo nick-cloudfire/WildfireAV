@@ -71,6 +71,9 @@ def _clean_cases() -> None:
     """Delete all numbered case folders (full reset before setup)."""
     print("  Deleting all case folders …")
     removed = 0
+    if not FIRE_ROOT.exists():
+        print("  FIRE_ROOT does not exist yet — nothing to clean.")
+        return
     for child in FIRE_ROOT.iterdir():
         if child.is_dir() and child.name.isdigit() and len(child.name) == 5:
             shutil.rmtree(child)
