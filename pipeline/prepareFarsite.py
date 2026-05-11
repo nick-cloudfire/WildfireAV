@@ -26,10 +26,13 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import fiona
 import numpy as np
 import rasterio
 from rasterio.transform import Affine
+from rasterio.transform import xy as transform_xy
 from rasterio.warp import reproject, Resampling as RioResampling
+from rasterio.windows import Window
 
 import pipelineConfig as cfg
 
@@ -119,6 +122,92 @@ def _burn_period_lines(start_dt, end_dt):
         lines.append(f"{d.month:02d} {d.day:02d} {s} {e}")
         d = d + timedelta(days=1)
     return lines
+
+
+def _is_valid_fuel(val, nodata, valid_min: float = 101.0) -> bool:
+    if val is None:
+        return False
+    if nodata is not None and val == nodata:
+        return False
+    try:
+        if np.isnan(val):
+            return False
+    except Exception:
+        pass
+    return val >= valid_min
+
+
+def _snap_to_valid_fuel(
+    fuels_tif: Path,
+    x: float,
+    y: float,
+    valid_min: float = 101.0,
+    max_radius_cells: int = 2000,
+) -> tuple[float, float, bool]:
+    """Snap (x, y) to the centre of the nearest pixel with fuel code >= valid_min."""
+    with rasterio.open(fuels_tif) as ds:
+        row0, col0 = ds.index(x, y)
+        row0 = min(max(row0, 0), ds.height - 1)
+        col0 = min(max(col0, 0), ds.width - 1)
+
+        v0 = ds.read(1, window=Window(col0, row0, 1, 1), masked=False)[0, 0]
+        if _is_valid_fuel(v0, ds.nodata, valid_min):
+            xc, yc = transform_xy(ds.transform, row0, col0, offset="center")
+            return float(xc), float(yc), False
+
+        for r in range(1, max_radius_cells + 1):
+            r0 = max(row0 - r, 0)
+            r1 = min(row0 + r, ds.height - 1)
+            c0 = max(col0 - r, 0)
+            c1 = min(col0 + r, ds.width - 1)
+            arr = ds.read(1, window=Window(c0, r0, c1 - c0 + 1, r1 - r0 + 1), masked=False)
+            valid = arr >= valid_min
+            if ds.nodata is not None:
+                valid &= arr != ds.nodata
+            if np.issubdtype(arr.dtype, np.floating):
+                valid &= ~np.isnan(arr)
+            if not np.any(valid):
+                continue
+            vrows, vcols = np.where(valid)
+            rows, cols = vrows + r0, vcols + c0
+            d2 = (rows - row0) ** 2 + (cols - col0) ** 2
+            k = int(np.argmin(d2))
+            xc, yc = transform_xy(ds.transform, int(rows[k]), int(cols[k]), offset="center")
+            return float(xc), float(yc), True
+
+    raise RuntimeError(
+        f"No valid fuel (>= {valid_min}) within {max_radius_cells} cells of ignition"
+    )
+
+
+def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path) -> bool:
+    """Snap the ignition shapefile point to the nearest valid fuel cell in-place.
+
+    Returns True if the point was moved.
+    """
+    with fiona.open(str(ignition_shp)) as src:
+        schema   = src.schema.copy()
+        crs      = src.crs
+        features = list(src)
+
+    if not features:
+        return False
+
+    feat   = dict(features[0])
+    coords = feat["geometry"]["coordinates"]
+    x, y   = float(coords[0]), float(coords[1])
+
+    x_snap, y_snap, moved = _snap_to_valid_fuel(fuels_tif, x, y)
+    if not moved:
+        return False
+
+    new_coords = (x_snap, y_snap) if len(coords) == 2 else (x_snap, y_snap, float(coords[2]))
+    feat["geometry"] = {"type": "Point", "coordinates": new_coords}
+
+    with fiona.open(str(ignition_shp), "w", driver="ESRI Shapefile",
+                    schema=schema, crs=crs) as dst:
+        dst.write(feat)
+    return True
 
 
 def _write_asc(data: np.ndarray, cellsize: float, xllcorner: float, yllcorner: float,
@@ -286,7 +375,9 @@ def main(case_dir: Path) -> None:
         ],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    print("  ignition.shp")
+    fuels_tif = (case_dir / INPUTS / FBFM_FILENAME).with_suffix(".tif")
+    snapped   = _snap_ignition_shp(farsite_dir / "ignition.shp", fuels_tif)
+    print("  ignition.shp" + ("  (snapped to valid fuel)" if snapped else ""))
 
     # ---- barrier.shp (optional) ----------------------------------------
     if USE_BARRIER:
