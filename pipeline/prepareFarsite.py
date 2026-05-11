@@ -458,7 +458,7 @@ def main(case_dir: Path) -> None:
         case_dir / INPUTS / WD_TIF_NAME,
         winds_dir, start_dt, end_dt,
     )
-    atm_path = winds_dir / "winds.atm"
+    atm_path = farsite_dir / "winds.atm"
     with atm_path.open("w", newline="\n") as f:
         f.write("ENGLISH\n")
         for month, day, hhmm, ws_rel, wd_rel in atm_entries:
@@ -498,7 +498,7 @@ def main(case_dir: Path) -> None:
         "",
         "FOLIAR_MOISTURE_CONTENT: 100",
         "CROWN_FIRE_METHOD: Finney",
-        "FARSITE_ATM_FILE: winds/winds.atm",
+        "FARSITE_ATM_FILE: winds.atm",
         "",
     ]
     farsite_input.write_text("\n".join(content) + "\n")

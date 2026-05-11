@@ -114,7 +114,7 @@ MODELS: list[ModelConfig] = [
 # Other user-configurable settings
 # ---------------------------------------------------------------------------
 
-ROOT_DIR         = Path(r"/home/nick/elmfire_validation/FirePairs")
+ROOT_DIR         = PC.FIRE_ROOT
 OUT_PDF          = ROOT_DIR / "validation_report.pdf"
 
 BURN_THRESHOLD        = 1.0
@@ -622,7 +622,7 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
     if base_toa:
         with rasterio.open(base_toa) as base_ds:
             _require_projected(base_ds, f"{base_mc.label} TOA")
-            _plot_barrier(ax_map, case_dir / "inputs" / "barrier.tif", base_ds)
+            _plot_barrier(ax_map, case_dir / PC.INPUTS_SUBDIR_NAME / PC.BARRIER_FILE_NAME, base_ds)
 
             for mc in MODELS:
                 toa = c.model_toas.get(mc.label)

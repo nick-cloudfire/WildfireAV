@@ -258,6 +258,7 @@ def _build_namelist(
 
     lines.append("&MONTE_CARLO")
     lines.append(f"NUM_METEOROLOGY_TIMES = {num_meteorology_times:d}")
+    lines.append("/\n")
 
     lines.append("&MISCELLANEOUS")
     lines.append(f"PATH_TO_GDAL = '{PATH_TO_GDAL}'")
