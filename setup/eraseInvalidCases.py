@@ -26,7 +26,7 @@ import pipelineConfig as cfg
 # Config
 # ---------------------------------------------------------------------------
 
-FIRE_ROOT           = Path(cfg.FIRE_ROOT_LOGIN_NODE)
+FIRE_ROOT           = Path(cfg.FIRE_ROOT)
 INFO_CSV            = cfg.FIRE_SUMMARY_SAT_CSV_PATH     # full path
 COL_FOLDER          = cfg.COL_FOLDER
 COL_SAT_IGNITION    = cfg.COL_SATELLITE_IGNITION

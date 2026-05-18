@@ -60,6 +60,7 @@ OUTPUT_HEIGHT_UNITS = cfg.WINDNINJA_OUTPUT_HEIGHT_UNITS
 MESH_RES_FACTOR     = cfg.WINDNINJA_MESH_RESOLUTION_FACTOR
 CFG_FILENAME        = cfg.WINDNINJA_CFG_FILENAME
 CONDA_ENV           = cfg.WINDNINJA_CONDA_ENV
+CONDA_EXE           = __import__("os").environ.get("CONDA_EXE", "conda")
 THREADS             = cfg.WINDNINJA_NUM_THREADS
 
 STAGE_BACK_SUFFIXES = {".asc", ".prj", ".json", ".kml", ".kmz", ".csv", ".txt"}
@@ -247,7 +248,7 @@ def _run_step(
     )
 
     cmd = [
-        "conda", "run", "--no-capture-output", "-n", CONDA_ENV,
+        CONDA_EXE, "run", "--no-capture-output", "-n", CONDA_ENV,
         "WindNinja_cli", str(cfg_path),
     ]
     log_path = step_dir / "windninja_cli.log"

@@ -50,7 +50,7 @@ import pipelineConfig
 # Config
 # ---------------------------------------------------------------------------
 
-FIRE_ROOT           = Path(pipelineConfig.FIRE_ROOT_LOGIN_NODE)
+FIRE_ROOT           = Path(pipelineConfig.FIRE_ROOT)
 MASTER_CSV          = pipelineConfig.FIRE_SUMMARY_CSV_PATH      # full path under FIRE_ROOT_LOGIN_NODE
 OUTPUT_CSV          = pipelineConfig.FIRE_SUMMARY_SAT_CSV_PATH  # full path under FIRE_ROOT_LOGIN_NODE
 
@@ -424,6 +424,7 @@ def main() -> None:
         + (f", {n_err} errors" if n_err else "")
     )
     print(f"Saving updated master to {OUTPUT_CSV} …")
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     master.to_csv(OUTPUT_CSV, index=False)
 
 

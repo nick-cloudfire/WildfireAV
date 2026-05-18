@@ -56,6 +56,7 @@ MAX_WINDOW_DAYS      = cfg.WINDNINJA_MAX_WINDOW_DAYS
 MESH_RES_FACTOR      = cfg.WINDNINJA_MESH_RESOLUTION_FACTOR
 CFG_FILENAME         = cfg.WINDNINJA_CFG_FILENAME
 CONDA_ENV            = cfg.WINDNINJA_CONDA_ENV
+CONDA_EXE            = __import__("os").environ.get("CONDA_EXE", "conda")
 THREADS              = cfg.WINDNINJA_NUM_THREADS
 
 # File extensions to copy from each chunk back to the main windninja folder
@@ -242,7 +243,7 @@ def _run_chunk(
     cfg_path.write_text(cfg_text, encoding="utf-8")
 
     cmd = [
-        "conda", "run", "--no-capture-output", "-n", CONDA_ENV,
+        CONDA_EXE, "run", "--no-capture-output", "-n", CONDA_ENV,
         "WindNinja_cli", str(cfg_path),
     ]
     print(

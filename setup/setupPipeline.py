@@ -39,7 +39,7 @@ import pipelineConfig as cfg
 from case_metadata import write_metadata_from_summary
 from parallel_api import Tee
 
-FIRE_ROOT     = Path(cfg.FIRE_ROOT_LOGIN_NODE)
+FIRE_ROOT     = Path(cfg.FIRE_ROOT)
 SUMMARY_CSV   = cfg.FIRE_SUMMARY_CSV_PATH
 SAT_CSV       = cfg.FIRE_SUMMARY_SAT_CSV_PATH
 

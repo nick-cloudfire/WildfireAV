@@ -31,7 +31,7 @@ from case_metadata import write_case_metadata
 
 PERIMS_FILE         = pipelineConfig.MTBS_PERIMS_WITH_IGNITIONS   # full path
 POINTS_FILE         = pipelineConfig.USFS_POINTS_MATCHED           # full path
-OUTPUT_ROOT         = Path(pipelineConfig.FIRE_ROOT_LOGIN_NODE)
+OUTPUT_ROOT         = Path(pipelineConfig.FIRE_ROOT)
 SUMMARY_CSV         = pipelineConfig.FIRE_SUMMARY_CSV_PATH         # full path
 
 PERIM_NAME_FIELD    = pipelineConfig.PERIM_NAME_FIELD
@@ -118,6 +118,7 @@ def main() -> None:
     if summary_rows:
         summary_df = pd.DataFrame(summary_rows)
         summary_df.sort_values(pipelineConfig.COL_FOLDER, inplace=True)
+        SUMMARY_CSV.parent.mkdir(parents=True, exist_ok=True)
         summary_df.to_csv(SUMMARY_CSV, index=False)
         print(f"Summary CSV written to: {SUMMARY_CSV}")
     else:
