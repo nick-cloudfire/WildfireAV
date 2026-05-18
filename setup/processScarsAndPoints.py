@@ -186,9 +186,11 @@ def main() -> None:
     perims_matched = perims_df.loc[matched_perim_idxs].copy()
     print(f"Unique matched perimeters: {len(perims_matched)}")
 
+    output_perims_file.parent.mkdir(parents=True, exist_ok=True)
     perims_matched.to_file(output_perims_file, index=False)
     print(f"Saved perimeters to: {output_perims_file}")
 
+    output_points_file.parent.mkdir(parents=True, exist_ok=True)
     points_matched.to_file(output_points_file, index=False)
     print(f"Saved points to: {output_points_file}")
 
