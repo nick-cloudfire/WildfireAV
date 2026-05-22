@@ -53,8 +53,8 @@ FIRE_ROOT               = FIRE_ROOT_LOGIN_NODE # Path(r"/scratch/nick") / "FireP
 INPUTS_DATA_ROOT        = BASE_DATA / "inputs"
 PERIMETER_DATA_ROOT     = INPUTS_DATA_ROOT
 SATELLITES_ROOT         = INPUTS_DATA_ROOT
-FARSITE_FB_DIR          = Path("/home/nick/farsite/src")  # Linux FARSITE binary directory
-FARSITE_EXE_NAME        = "TestFARSITE"                   # Linux executable name
+FARSITE_FB_DIR          = Path("/home/nick/farsite/bin")  # Wine FARSITE binary directory
+FARSITE_EXE_NAME        = "TestFARSITE.exe"               # Wine executable name
 
 # =============================================================================
 # 3. FILE / DIRECTORY NAMES

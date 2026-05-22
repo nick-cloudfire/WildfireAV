@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Step 11 of runPipelineParallel: execute FARSITE (Linux native) for one case.
+Step 11 of runPipelineParallel: execute FARSITE (Wine) for one case.
 
 Prerequisites (produced by step 9 – prepareFarsite):
+    <case_dir>/farsite/farsite.txt
     <case_dir>/farsite/farsite.input
     <case_dir>/farsite/landscape.lcp
     <case_dir>/farsite/ignition.shp
@@ -11,9 +12,8 @@ Prerequisites (produced by step 9 – prepareFarsite):
 
 What this script does
 ---------------------
-1.  Writes  <case_dir>/farsite/farsite_linux.txt  with one absolute-path command line
-2.  Runs  <FARSITE_EXE> farsite_linux.txt
-3.  Skips the case when  <outputs>/farsite_ArrivalTime.asc  already exists.
+1.  Runs  WINEDEBUG=-all wine64 <FARSITE_EXE> farsite.txt  from within farsite_dir
+2.  Skips the case when  <outputs>/farsite_ArrivalTime.tif  already exists.
 
 Standalone usage (process all cases under FIRE_ROOT):
     python runFarsiteCase.py
@@ -21,6 +21,7 @@ Standalone usage (process all cases under FIRE_ROOT):
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pipelineConfig as cfg
@@ -33,7 +34,7 @@ from parallel_api import run_subprocess
 FIRE_ROOT    = Path(cfg.FIRE_ROOT)
 FARSITE_EXE  = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
 
-ARRIVAL_TIME_ASC = "farsite_ArrivalTime.asc"   # completion sentinel
+ARRIVAL_TIME_TIF = "farsite_ArrivalTime.tif"   # completion sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -45,52 +46,38 @@ def run_farsite(case_dir: Path) -> None:
     case_dir    = Path(case_dir).absolute()
     farsite_dir = case_dir / "farsite"
     outputs_dir = farsite_dir / "outputs"
-    sentinel    = outputs_dir / ARRIVAL_TIME_ASC
+    sentinel    = outputs_dir / ARRIVAL_TIME_TIF
 
     if sentinel.exists():
         print(f"  Skipped — FARSITE outputs already exist.")
         return
 
-    farsite_input = farsite_dir / "farsite.input"
-    if not farsite_input.exists():
+    cmd_file = farsite_dir / "farsite.txt"
+    if not cmd_file.exists():
         raise FileNotFoundError(
-            f"farsite.input not found in {farsite_dir}. "
+            f"farsite.txt not found in {farsite_dir}. "
             "Run prepareFarsite (step 9) first."
         )
 
-    # ---- build command file ---------------------------------------------
-    barrier_shp = farsite_dir / "barrier.shp"
-    barrier_arg = str(barrier_shp) if barrier_shp.exists() else "0"
-
-    cmd_line = " ".join([
-        str(farsite_dir / "landscape.lcp"),
-        str(farsite_dir / "farsite.input"),
-        str(farsite_dir / "ignition.shp"),
-        barrier_arg,
-        str(outputs_dir / "farsite"),   # output base name (no extension)
-        "1",                             # output type: ASCII grid (.asc)
-    ])
-
-    cmd_file = farsite_dir / "farsite_linux.txt"
-    cmd_file.write_text(cmd_line + "\n")
-
     # ---- run ------------------------------------------------------------
-    print(f"  Running: {FARSITE_EXE.name} farsite_linux.txt")
+    wine_env = {**os.environ, "WINEDEBUG": "-all"}
+    print(f"  Running: wine64 {FARSITE_EXE.name} farsite.txt")
     run_subprocess(
-        [str(FARSITE_EXE), str(cmd_file)],
+        ["wine64", str(FARSITE_EXE), "farsite.txt"],
         cwd=str(farsite_dir),
+        env=wine_env,
     )
 
     if sentinel.exists():
         print(f"  FARSITE complete — outputs in {outputs_dir}")
     else:
         raise RuntimeError(
-            f"FARSITE finished but '{ARRIVAL_TIME_ASC}' was not created. "
+            f"FARSITE finished but '{ARRIVAL_TIME_TIF}' was not created. "
             "Check the output above for errors."
         )
 
     # ---- clean up outputs -----------------------------------------------
-    keep = {ARRIVAL_TIME_ASC, ARRIVAL_TIME_ASC.replace(".asc", ".prj")}
+    keep = {ARRIVAL_TIME_TIF}
 
     removed = 0
     for f in outputs_dir.iterdir():

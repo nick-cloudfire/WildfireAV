@@ -438,11 +438,11 @@ def main(case_dir: Path) -> None:
     print(f"  output.fms   ({len(present)} fuel classes)")
 
     # ---- farsite.txt ---------------------------------------------------
-    _rel         = farsite_dir.relative_to(FIRE_ROOT)
-    barrier_arg  = f"{_rel}/barrier.shp" if USE_BARRIER else "0"
+    # Paths are relative to farsite_dir since wine runs with cwd=farsite_dir.
+    barrier_arg  = "barrier.shp" if USE_BARRIER else "0"
     farsite_line = (
-        f"{_rel}/landscape.lcp {_rel}/farsite.input "
-        f"{_rel}/ignition.shp {barrier_arg} {_rel}/outputs/farsite 2"
+        f"landscape.lcp farsite.input "
+        f"ignition.shp {barrier_arg} outputs/farsite 2"
     )
     (farsite_dir / "farsite.txt").write_text(farsite_line + "\n")
 
