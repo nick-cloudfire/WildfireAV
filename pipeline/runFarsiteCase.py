@@ -13,7 +13,7 @@ Prerequisites (produced by step 9 – prepareFarsite):
 What this script does
 ---------------------
 1.  Runs  WINEDEBUG=-all wine64 <FARSITE_EXE> farsite.txt  from within farsite_dir
-2.  Skips the case when  <outputs>/farsite_ArrivalTime.tif  already exists.
+2.  Skips the case when  <outputs>/farsite_Arrival Time.tif  already exists.
 
 Standalone usage (process all cases under FIRE_ROOT):
     python runFarsiteCase.py
@@ -34,7 +34,7 @@ from parallel_api import run_subprocess
 FIRE_ROOT    = Path(cfg.FIRE_ROOT)
 FARSITE_EXE  = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
 
-ARRIVAL_TIME_TIF = "farsite_ArrivalTime.tif"   # completion sentinel
+ARRIVAL_TIME_TIF = "farsite_Arrival Time.tif"   # completion sentinel
 
 
 # ---------------------------------------------------------------------------

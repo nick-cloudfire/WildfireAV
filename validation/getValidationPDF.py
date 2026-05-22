@@ -102,7 +102,7 @@ MODELS: list[ModelConfig] = [
     ),
     ModelConfig(
         label    = "FARSITE",
-        toa_rel  = "farsite/outputs/farsite_ArrivalTime.tif",
+        toa_rel  = "farsite/outputs/farsite_Arrival Time.tif",
         band     = 1,
         toa_unit = "min",
         color    = (0.0, 0.4, 1.0),
