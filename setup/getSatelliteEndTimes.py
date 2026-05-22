@@ -151,7 +151,7 @@ def _time_to_coverage_fraction(
 
     times  = pts["sat_datetime"].tolist()
     buffers = [
-        g.buffer(buffer_dist, resolution=buffer_resolution)
+        g.buffer(buffer_dist, quad_segs=buffer_resolution)
         for g in pts.geometry.values
     ]
 

@@ -90,7 +90,7 @@ def run_farsite(case_dir: Path) -> None:
         )
 
     # ---- clean up outputs -----------------------------------------------
-    keep = {ARRIVAL_TIME_ASC}
+    keep = {ARRIVAL_TIME_ASC, ARRIVAL_TIME_ASC.replace(".asc", ".prj")}
 
     removed = 0
     for f in outputs_dir.iterdir():

@@ -52,6 +52,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 import argparse
 import sys
+import traceback
 
 import pipelineConfig
 from case_metadata import case_dirs
@@ -67,71 +68,79 @@ def process_case(case_dir: Path, log_only: bool = False) -> None:
     with open(log_file, "w", encoding="utf-8", buffering=1) as log:
         out = log if log_only else Tee(sys.stdout, log)
         with redirect_stdout(out), redirect_stderr(out):
-            print(f"=== CASE: {case_dir.name}  [wind_source={wind_source}] ===")
+            try:
+              _run_case(case_dir, wind_source)
+            except Exception:
+                traceback.print_exc()
+                raise
 
-            import getLandfireProductsForFireSim as landfire
-            print("\n=== STEP 1: download_landfire ===")
-            landfire.main(case_dir)
 
-            import splitLandfireTifBands as split_lf
-            print("\n=== STEP 2: split_landfire_bands ===")
-            split_lf.main(case_dir)
+def _run_case(case_dir: Path, wind_source: str) -> None:
+    print(f"=== CASE: {case_dir.name}  [wind_source={wind_source}] ===")
 
-            import makePhiAndAdjFiles as adjphi
-            print("\n=== STEP 3: make_adj_phi ===")
-            adjphi.main(case_dir)
+    import getLandfireProductsForFireSim as landfire
+    print("\n=== STEP 1: download_landfire ===")
+    landfire.main(case_dir)
 
-            import downloadWeatherData as weather
-            print("\n=== STEP 4: download_weather_wxs ===")
-            weather.main(case_dir)
+    import splitLandfireTifBands as split_lf
+    print("\n=== STEP 2: split_landfire_bands ===")
+    split_lf.main(case_dir)
 
-            if wind_source == "install":
-                if pipelineConfig.WINDNINJA_MODE == "wxModel":
-                    import downloadAndRunWindninja_wxModel as wn
-                else:
-                    import downloadAndRunWindninja_WXS as wn
-                print(f"\n=== STEP 5: windninja ({pipelineConfig.WINDNINJA_MODE}) ===")
-                wn.main(case_dir)
-            else:
-                print("\n=== STEP 5: windninja SKIPPED (wind_source=farsite) ===")
+    import makePhiAndAdjFiles as adjphi
+    print("\n=== STEP 3: make_adj_phi ===")
+    adjphi.main(case_dir)
 
-            import applyNelsonModel as nelson
-            print("\n=== STEP 6: apply_nelson_model ===")
-            nelson.main(case_dir)
+    import downloadWeatherData as weather
+    print("\n=== STEP 4: download_weather_wxs ===")
+    weather.main(case_dir)
 
-            import getBarrierFile as barrier
-            print("\n=== STEP 7: create_barrier_file ===")
-            barrier.main(case_dir)
+    if wind_source == "install":
+        if pipelineConfig.WINDNINJA_MODE == "wxModel":
+            import downloadAndRunWindninja_wxModel as wn
+        else:
+            import downloadAndRunWindninja_WXS as wn
+        print(f"\n=== STEP 5: windninja ({pipelineConfig.WINDNINJA_MODE}) ===")
+        wn.main(case_dir)
+    else:
+        print("\n=== STEP 5: windninja SKIPPED (wind_source=farsite) ===")
 
-            import createElmfireInputFiles as elm
-            print("\n=== STEP 8: create_elmfire_input_files ===")
-            elm.main(case_dir)
+    import applyNelsonModel as nelson
+    print("\n=== STEP 6: apply_nelson_model ===")
+    nelson.main(case_dir)
 
-            import prepareFarsite as farsite_prep
-            print("\n=== STEP 9: prepare_farsite ===")
-            farsite_prep.main(case_dir)
+    import getBarrierFile as barrier
+    print("\n=== STEP 7: create_barrier_file ===")
+    barrier.main(case_dir)
 
-            import runFarsiteCase as run_farsite
-            import runElmfireCase as run_elm
+    import createElmfireInputFiles as elm
+    print("\n=== STEP 8: create_elmfire_input_files ===")
+    elm.main(case_dir)
 
-            if wind_source == "farsite":
-                print("\n=== STEP 10: run_farsite (wind source) ===")
-                run_farsite.main(case_dir)
+    import prepareFarsite as farsite_prep
+    print("\n=== STEP 9: prepare_farsite ===")
+    farsite_prep.main(case_dir)
 
-                import farsiteWindToGeotiff as farsite_wind
-                print("\n=== STEP 11: farsite_wind_to_geotiff ===")
-                farsite_wind.main(case_dir)
+    import runFarsiteCase as run_farsite
+    import runElmfireCase as run_elm
 
-                print("\n=== STEP 12: run_elmfire ===")
-                run_elm.main(case_dir)
-            else:
-                print("\n=== STEP 10: run_elmfire ===")
-                run_elm.main(case_dir)
+    if wind_source == "farsite":
+        print("\n=== STEP 10: run_farsite (wind source) ===")
+        run_farsite.main(case_dir)
 
-                print("\n=== STEP 11: run_farsite ===")
-                run_farsite.main(case_dir)
+        import farsiteWindToGeotiff as farsite_wind
+        print("\n=== STEP 11: farsite_wind_to_geotiff ===")
+        farsite_wind.main(case_dir)
 
-            print("\nCASE COMPLETED.")
+        print("\n=== STEP 12: run_elmfire ===")
+        run_elm.main(case_dir)
+    else:
+        print("\n=== STEP 10: run_elmfire ===")
+        run_elm.main(case_dir)
+
+        print("\n=== STEP 11: run_farsite ===")
+        run_farsite.main(case_dir)
+
+    print("\nCASE COMPLETED.")
 
 
 def parse_args() -> argparse.Namespace:
