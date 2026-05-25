@@ -508,19 +508,31 @@ All settings are documented inline in `pipelineConfig.py`.
 | 10. ELMFIRE | exe, GDAL path, simulation parameters, moisture content |
 | 11. FARSITE | `FARSITE_FB_DIR` (dir with Linux binary), `FARSITE_EXE_NAME` |
 | 12. Barrier | road/water widths, OSM field names |
-| 13. LFPS API | base URL, product list, poll parameters |
+| 13. LFPS API | base URL, product list, `LFPS_POLL_SLEEP_S`, `LFPS_POLL_HEARTBEAT_S` |
 | 14. Nelson | path to C# executable |
 
 ---
 
 ## Troubleshooting
 
-### LANDFIRE job fails or times out
-- The pipeline retries each LANDFIRE download up to 3 times automatically
-  (`MAX_RETRIES` in `getLandfireProductsForFireSim.py`).
-- Check that `LFPS_EMAIL` is set in your shell (`echo $LFPS_EMAIL`) and that the address is registered at https://lfps.usgs.gov.
-- Increase `LFPS_POLL_MAX_TRIES` (default 300 × 10 s ≈ 50 min).
-- The LFPS service can be slow during peak hours; try again later.
+### LANDFIRE job is stuck in queue
+- The LFPS queue can be very long when many users are submitting jobs simultaneously.
+  The pipeline polls indefinitely — it will wait however long the queue takes.
+- A "still waiting…" heartbeat is logged every `LFPS_POLL_HEARTBEAT_S` seconds
+  (default 1800 s / 30 min) so you can confirm the job is still live.
+- Do **not** kill and resubmit the job — that adds another entry to the queue and
+  makes the wait longer for everyone.
+- Retries (up to `MAX_RETRIES = 3`) are reserved for genuine failures (job status
+  `Failed` or network errors), not queue waits.
+- Check that `LFPS_EMAIL` is set in your shell (`echo $LFPS_EMAIL`) and that the
+  address is registered at https://lfps.usgs.gov.
+
+### OpenMeteo weather download fails with 502 / 503 / 504
+- These are transient gateway errors from the OpenMeteo server.  The pipeline
+  automatically retries up to 6 times with exponential back-off (5 s → 10 s → 20 s
+  → 40 s → 60 s → 60 s).  No action needed unless all 6 attempts fail.
+- A permanent failure (any other 4xx status) is not retried and will appear in
+  `pipeline.log` with the URL and response body.
 
 ### WindNinja fails
 - Confirm `WINDNINJA_CONDA_ENV` matches the conda environment with `WindNinja_cli` on PATH.
