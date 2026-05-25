@@ -40,8 +40,8 @@ EXPAND          = cfg.EXPAND
 FIRESCAR_NAME   = cfg.BURN_SHAPE_NAME
 BASE_API        = cfg.LFPS_BASE_API
 TERRAIN_PRODUCTS = list(cfg.LFPS_TERRAIN_PRODUCTS)   # always downloaded
-POLL_SLEEP_S    = cfg.LFPS_POLL_SLEEP_S
-POLL_MAX_TRIES  = cfg.LFPS_POLL_MAX_TRIES
+POLL_SLEEP_S        = cfg.LFPS_POLL_SLEEP_S
+POLL_HEARTBEAT_S    = cfg.LFPS_POLL_HEARTBEAT_S
 MAX_RETRIES     = 3     # total attempts per case before giving up
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,8 @@ def _poll_job(job_id: str, log=print) -> dict:
     t0 = time.monotonic()
     last_status = None
     last_queue_pos = None
-    for _ in range(POLL_MAX_TRIES):
+    last_heartbeat = t0
+    while True:
         try:
             r = get_thread_session().get(
                 f"{BASE_API}/api/job/status", params={"JobId": job_id}, timeout=30
@@ -140,6 +141,7 @@ def _poll_job(job_id: str, log=print) -> dict:
         status = js.get("status")
         queue_pos = js.get("queuePosition")
         elapsed = int(time.monotonic() - t0)
+        now = time.monotonic()
         if status != last_status or queue_pos != last_queue_pos:
             if queue_pos is not None and status not in ("Succeeded", "Failed"):
                 log(f"  [{elapsed:4d}s] {status} (queue position: {queue_pos})")
@@ -147,12 +149,15 @@ def _poll_job(job_id: str, log=print) -> dict:
                 log(f"  [{elapsed:4d}s] {status}")
             last_status = status
             last_queue_pos = queue_pos
+            last_heartbeat = now
+        elif POLL_HEARTBEAT_S > 0 and (now - last_heartbeat) >= POLL_HEARTBEAT_S:
+            log(f"  [{elapsed:4d}s] still waiting… {status} (queue position: {queue_pos})")
+            last_heartbeat = now
         if status == "Succeeded":
             return js
         if status == "Failed":
             raise RuntimeError(f"LFPS job {job_id} failed: {js}")
         time.sleep(POLL_SLEEP_S)
-    raise TimeoutError(f"LFPS job {job_id} timed out after {POLL_MAX_TRIES} polls")
 
 
 def _download_zip(url: str, out_path: Path) -> None:

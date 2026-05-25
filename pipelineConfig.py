@@ -242,9 +242,9 @@ WATER_WIDTHS_M = {
 
 LFPS_BASE_API           = "https://lfps.usgs.gov"
 LFPS_TERRAIN_PRODUCTS   = ["LF2020_Elev", "LF2020_SlpD", "LF2020_Asp"]  # always downloaded
-LFPS_POLL_SLEEP_S       = 10    # seconds between job-status polls
-LFPS_POLL_MAX_TRIES     = 300   # max polls before timeout (~50 min)
-LFPS_CONCURRENT_JOBS    = 60     # concurrent LFPS jobs in prefetchLandfire.py
+LFPS_POLL_SLEEP_S           = 10    # seconds between job-status polls
+LFPS_POLL_HEARTBEAT_S       = 1800  # log "still waiting" every N seconds (0 = disable)
+LFPS_CONCURRENT_JOBS        = 60    # concurrent LFPS jobs in prefetchLandfire.py
 
 # =============================================================================
 # 13. NELSON DEAD-FUEL MODEL
