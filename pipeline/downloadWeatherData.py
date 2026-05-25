@@ -95,10 +95,9 @@ def _fetch_hourly(task: WeatherTask) -> tuple[pd.DatetimeIndex, dict]:
 
     def _do():
         r = s.get(OPENMETEO_URL, params=params, timeout=60)
-        if r.status_code == 429:
-            # Raise a retryable exception so retry_call will back off and retry
+        if r.status_code in (429, 502, 503, 504):
             raise requests.RequestException(
-                f"[{task.folder_name}] Rate limited (429) — retrying"
+                f"[{task.folder_name}] Transient HTTP {r.status_code} — retrying"
             )
         if not r.ok:
             raise RuntimeError(
