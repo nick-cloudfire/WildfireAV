@@ -122,6 +122,7 @@ ALL_TOUCHED_OBS       = False
 CURVE_MAX_POINTS      = 300
 MODEL_CURVE_BINS      = 600
 NON_IGNITION_JACCARD  = 0.01   # cases where max Jaccard < this are treated as non-ignited
+N_ISOCHRONES          = 12     # contour lines per model on the arrival-time map
 
 FIRESCAR_NAME  = getattr(PC, "BURN_SHAPE_NAME",            "firescar.gpkg")
 IGNITION_NAME  = getattr(PC, "IGNITION_POINT_SHP_NAME",    "ignition_point.gpkg")
@@ -501,6 +502,64 @@ def _plot_barrier(ax, barrier_path: Path, base_ds, alpha: float = 0.15, gray: fl
         log.warning("Barrier overlay failed: %s", e)
 
 
+def _plot_isochrones(
+    ax,
+    toa_arr: np.ndarray,
+    src_ds,
+    base_ds,
+    threshold: float,
+    n: int,
+    color,
+    src_crs=None,
+) -> None:
+    """Draw n evenly-spaced TOA contour lines (isochrones) onto ax.
+
+    If src_ds differs from base_ds the float TOA array is reprojected to the
+    base grid first so the contours align with the burn-mask overlay.
+    """
+    if n <= 0:
+        return
+
+    if src_ds is not base_ds:
+        arr = np.full((base_ds.height, base_ds.width), np.nan, dtype=np.float32)
+        reproject(
+            source=toa_arr.astype(np.float32),
+            destination=arr,
+            src_transform=src_ds.transform,
+            src_crs=src_crs or src_ds.crs,
+            dst_transform=base_ds.transform,
+            dst_crs=base_ds.crs,
+            resampling=Resampling.bilinear,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+        )
+    else:
+        arr = toa_arr.astype(np.float32)
+
+    valid = arr[np.isfinite(arr) & (arr >= threshold)]
+    if valid.size < 4:
+        return
+
+    vmin, vmax = float(valid.min()), float(valid.max())
+    if vmax <= vmin:
+        return
+
+    levels = np.linspace(vmin, vmax, n + 2)[1:-1]
+
+    ext = plotting_extent(base_ds)          # (left, right, bottom, top)
+    h, w = arr.shape
+    x = np.linspace(ext[0], ext[1], w)
+    y = np.linspace(ext[3], ext[2], h)      # top → bottom (origin="upper")
+    X, Y = np.meshgrid(x, y)
+
+    draw = np.ma.masked_where(~(np.isfinite(arr) & (arr >= threshold)), arr)
+
+    try:
+        ax.contour(X, Y, draw, levels=levels, colors=[color], linewidths=0.7, alpha=0.85)
+    except Exception as e:
+        log.warning("Isochrone contour failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Text block
 # ---------------------------------------------------------------------------
@@ -632,6 +691,10 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
                     if toa == base_toa:
                         mask = _burn_mask(base_ds, mc.band, BURN_THRESHOLD)
                         _plot_mask(ax_map, base_ds, mask, mc.rgba)
+                        cached = c.toa_arrays.get(mc.label)
+                        if cached is not None:
+                            _plot_isochrones(ax_map, cached[0], base_ds, base_ds,
+                                             BURN_THRESHOLD, N_ISOCHRONES, mc.color)
                     else:
                         with rasterio.open(toa) as ds2:
                             eff_crs = _require_projected(ds2, f"{mc.label} TOA",
@@ -640,6 +703,11 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
                             on_base = _reproject_mask(ds2, base_ds, raw_u8,
                                                       src_crs=eff_crs).astype(bool)
                             _plot_mask(ax_map, base_ds, on_base, mc.rgba)
+                            cached = c.toa_arrays.get(mc.label)
+                            if cached is not None:
+                                _plot_isochrones(ax_map, cached[0], ds2, base_ds,
+                                                 BURN_THRESHOLD, N_ISOCHRONES, mc.color,
+                                                 src_crs=eff_crs)
                     plotted_models.append(mc.label)
                 except Exception as e:
                     log.warning("Case %s: %s map overlay failed: %s", c.case_id, mc.label, e)
@@ -675,6 +743,8 @@ def _case_page(c: Case, case_dir: Path) -> plt.Figure:
     for mc in MODELS:
         if mc.label in plotted_models:
             handles.append(Patch(facecolor=mc.color, alpha=mc.alpha, label=f"{mc.label} burn"))
+            handles.append(Line2D([0], [0], color=mc.color, linewidth=0.7,
+                                   label=f"{mc.label} isochrones ({N_ISOCHRONES})"))
         elif mc.label in failed_models:
             handles.append(Patch(facecolor="none", edgecolor=mc.color, linewidth=1,
                                  linestyle="--", label=f"{mc.label} (overlay error)"))
