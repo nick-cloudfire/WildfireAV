@@ -251,3 +251,13 @@ LFPS_CONCURRENT_JOBS        = 60    # concurrent LFPS jobs in prefetchLandfire.p
 # =============================================================================
 
 NELSON_EXE = BASE_DATA / "nelson_csharp" / "bin" / "Release" / "net8.0" / "nelson_csharp"
+
+# =============================================================================
+# LOCAL OVERRIDES  (machine-specific — never committed)
+# Create pipelineConfig_local.py alongside this file to override any setting
+# above.  That file is gitignored so HPC/local paths never conflict.
+# =============================================================================
+try:
+    from pipelineConfig_local import *  # noqa: F401, F403
+except ImportError:
+    pass
