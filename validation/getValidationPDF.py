@@ -281,6 +281,18 @@ def _firescar_union(path: Path) -> gpd.GeoSeries:
     return gpd.GeoSeries([geom], crs=gdf.crs)
 
 
+def _reproject_obs(gs: gpd.GeoSeries, target_crs) -> gpd.GeoSeries:
+    """Reproject *gs* to *target_crs*, falling back via EPSG:4326 if the direct
+    path produces non-finite coordinates (e.g. missing NAD83 datum-shift grid)."""
+    result = gs.to_crs(target_crs)
+    bounds = result.iloc[0].bounds
+    if all(np.isfinite(b) for b in bounds):
+        return result
+    # Fallback: go through WGS84 to avoid a problematic datum-shift path
+    log.debug("Direct reprojection to %s produced non-finite bounds; retrying via EPSG:4326", target_crs)
+    return gs.to_crs("EPSG:4326").to_crs(target_crs)
+
+
 def _read_ignition(case_dir: Path) -> gpd.GeoDataFrame:
     p = case_dir / IGNITION_NAME
     if not p.exists():
@@ -1370,11 +1382,13 @@ def process_case(case_dir: Path) -> Case:
 
         if obs_src.crs is None:
             obs_src = obs_src.set_crs("EPSG:4326")
-        obs_geom_base = obs_src.to_crs(base_ds.crs).iloc[0]
+        obs_geom_base = _reproject_obs(obs_src, base_ds.crs).iloc[0]
         try:
             obs_geom_base = obs_geom_base.buffer(0)
         except Exception:
             pass
+        if not all(np.isfinite(b) for b in obs_geom_base.bounds):
+            raise ValueError("Firescar reprojection produced non-finite coordinates")
 
         if ign_src.crs is None:
             ign_src = ign_src.set_crs("EPSG:4326")
@@ -1404,7 +1418,7 @@ def process_case(case_dir: Path) -> Case:
                     with rasterio.open(toa) as ds2:
                         eff_crs = _require_projected(ds2, f"{mc.label} TOA",
                                                      fallback_crs=base_ds.crs)
-                        obs_geom2 = obs_src.to_crs(eff_crs).iloc[0]
+                        obs_geom2 = _reproject_obs(obs_src, eff_crs).iloc[0]
                         try:
                             obs_geom2 = obs_geom2.buffer(0)
                         except Exception:
@@ -1467,6 +1481,7 @@ def iter_cases(root: Path) -> list[Path]:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("pyproj").setLevel(logging.CRITICAL)
     case_dirs_list = iter_cases(ROOT_DIR)
     if not case_dirs_list:
         raise RuntimeError(f"No cases found under {ROOT_DIR}")
