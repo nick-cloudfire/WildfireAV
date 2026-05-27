@@ -1504,7 +1504,7 @@ def main() -> None:
 
     # Pass 1: process all cases in parallel (no figures yet — we need all
     # results before writing summary pages).
-    n_workers = min(PC.MAX_PARALLEL_WORKERS, os.cpu_count() or 4)
+    n_workers = min(getattr(PC, "MAX_PARALLEL_WORKERS", 16), os.cpu_count() or 4)
     log.info("Processing %d cases with %d workers …", len(case_dirs_list), n_workers)
     result_map: dict[Path, tuple[Case | None, Exception | None]] = {}
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
