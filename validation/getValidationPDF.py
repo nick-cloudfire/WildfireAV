@@ -282,15 +282,29 @@ def _firescar_union(path: Path) -> gpd.GeoSeries:
 
 
 def _reproject_obs(gs: gpd.GeoSeries, target_crs) -> gpd.GeoSeries:
-    """Reproject *gs* to *target_crs*, falling back via EPSG:4326 if the direct
-    path produces non-finite coordinates (e.g. missing NAD83 datum-shift grid)."""
+    """Reproject *gs* to *target_crs* with two fallbacks for broken PROJ installs.
+
+    Some environments lack NAD83 datum-shift grids, causing EPSG:4269→projected
+    transformations to return non-finite coordinates.  Fallback order:
+      1. Direct to_crs(target_crs)
+      2. Via EPSG:4326 (datum-shift intermediate)
+      3. Override source CRS to EPSG:4326 (treats NAD83 coords as WGS84 — safe
+         because the two datums differ by only ~1-2 m for CONUS fires)
+    """
+    def _finite(result):
+        return all(np.isfinite(b) for b in result.iloc[0].bounds)
+
     result = gs.to_crs(target_crs)
-    bounds = result.iloc[0].bounds
-    if all(np.isfinite(b) for b in bounds):
+    if _finite(result):
         return result
-    # Fallback: go through WGS84 to avoid a problematic datum-shift path
+
     log.debug("Direct reprojection to %s produced non-finite bounds; retrying via EPSG:4326", target_crs)
-    return gs.to_crs("EPSG:4326").to_crs(target_crs)
+    result = gs.to_crs("EPSG:4326").to_crs(target_crs)
+    if _finite(result):
+        return result
+
+    log.debug("Via-4326 reprojection also non-finite; overriding source CRS to EPSG:4326")
+    return gs.set_crs("EPSG:4326", allow_override=True).to_crs(target_crs)
 
 
 def _read_ignition(case_dir: Path) -> gpd.GeoDataFrame:
