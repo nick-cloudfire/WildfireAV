@@ -39,7 +39,6 @@ LANDFIRE_EMAIL              = os.environ["LFPS_EMAIL"]  # set in shell: export L
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
 SETUP_PIPELINE_MAX_WORKERS  = 12        # parallel workers for getSatelliteEndTimes
-MAX_PARALLEL_WORKERS        = 16        # parallel workers for getValidationPDF
 MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
 WINDNINJA_SOURCE            = "install"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
 
