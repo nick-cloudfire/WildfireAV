@@ -122,7 +122,7 @@ ALL_TOUCHED_OBS       = False
 CURVE_MAX_POINTS      = 300
 MODEL_CURVE_BINS      = 600
 NON_IGNITION_JACCARD  = 0.01   # cases where max Jaccard < this are treated as non-ignited
-N_ISOCHRONES          = 12     # contour lines per model on the arrival-time map
+N_ISOCHRONES          = 6      # contour lines per model on the arrival-time map
 
 FIRESCAR_NAME  = getattr(PC, "BURN_SHAPE_NAME",            "firescar.gpkg")
 IGNITION_NAME  = getattr(PC, "IGNITION_POINT_SHP_NAME",    "ignition_point.gpkg")
