@@ -95,7 +95,9 @@ def _run_case(case_dir: Path, wind_source: str) -> None:
     weather.main(case_dir)
 
     if wind_source == "install":
-        if pipelineConfig.WINDNINJA_MODE == "wxModel":
+        if pipelineConfig.WINDNINJA_MODE == "hrrrLocal":
+            import downloadAndRunWindninja_hrrr as wn
+        elif pipelineConfig.WINDNINJA_MODE == "wxModel":
             import downloadAndRunWindninja_wxModel as wn
         else:
             import downloadAndRunWindninja_WXS as wn
