@@ -1,8 +1,7 @@
 """
-Step 3 of runPipelineParallel: create adjacency (adj.tif) and phi (phi.tif) rasters.
+Step "adj_phi": write the static ELMFIRE inputs adj.tif and phi.tif.
 
-Both rasters are filled with 1.0 and match the DEM in shape, CRS, and transform.
-They are required by Elmfire as static inputs.
+Both are filled with 1.0 on the DEM grid (same shape, CRS, transform).
 """
 
 from pathlib import Path
@@ -11,55 +10,32 @@ import numpy as np
 import rasterio
 
 import pipelineConfig as cfg
+from common import atomic_write, for_each_case, require, skipped
 
-FIRE_ROOT = cfg.FIRE_ROOT
-INPUTS    = cfg.INPUTS_SUBDIR_NAME
-DEM_NAME  = cfg.LANDFIRE_BAND_FILE_NAMES[0] + ".tif"
-ADJ_NAME  = cfg.ADJ_FILE_NAME
-PHI_NAME  = cfg.PHI_FILE_NAME
-DTYPE     = cfg.RASTER_DTYPE
-NODATA    = cfg.RASTER_NODATA
+DEM_NAME = cfg.LANDFIRE_BAND_FILE_NAMES[0] + ".tif"
 
 
-def _create_for_folder(folder: Path) -> None:
-    inputs  = folder / INPUTS
+def _process(folder: Path):
+    inputs = folder / cfg.INPUTS_SUBDIR_NAME
     dem_path = inputs / DEM_NAME
-    if not dem_path.exists():
-        print(f"  DEM not found at {dem_path}, skipping.")
-        return
-
-    if (inputs / ADJ_NAME).exists() and (inputs / PHI_NAME).exists():
-        print(f"  Skipped — adj.tif and phi.tif already exist.")
-        return
+    require(dem_path, hint="run the split_bands step first")
+    outs = [inputs / cfg.ADJ_FILE_NAME, inputs / cfg.PHI_FILE_NAME]
+    if all(p.exists() for p in outs):
+        return skipped("adj.tif and phi.tif already exist")
 
     with rasterio.open(dem_path) as src:
-        profile = src.profile.copy()
-
-    profile.update(
-        dtype=DTYPE, count=1, nodata=NODATA,
-        compress="lzw", tiled=True, bigtiff="IF_SAFER",
-    )
-    ones = np.ones((profile["height"], profile["width"]), dtype=DTYPE)
-
-    for name in (ADJ_NAME, PHI_NAME):
-        out_path = inputs / name
-        with rasterio.open(out_path, "w", **profile) as dst:
+        profile = {k: v for k, v in src.profile.items() if k not in ("blockxsize", "blockysize")}
+        profile.update(dtype=cfg.RASTER_DTYPE, count=1, nodata=cfg.RASTER_NODATA,
+                       compress="lzw", tiled=True, bigtiff="IF_SAFER")
+    ones = np.ones((profile["height"], profile["width"]), dtype=cfg.RASTER_DTYPE)
+    for out_path in outs:
+        with atomic_write(out_path) as tmp, rasterio.open(tmp, "w", **profile) as dst:
             dst.write(ones, 1)
-        print(f"  Wrote {out_path}")
+    print(f"  Wrote {', '.join(p.name for p in outs)}")
 
 
-def main(case_dir=None) -> None:
-    if case_dir is not None:
-        folder = Path(case_dir)
-        print(f"\nFolder {folder.name}:")
-        _create_for_folder(folder)
-        return
-
-    root = Path(FIRE_ROOT)
-    for folder in sorted(root.iterdir()):
-        if folder.is_dir() and folder.name.isdigit():
-            print(f"\nFolder {folder.name}:")
-            _create_for_folder(folder)
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
 
 
 if __name__ == "__main__":

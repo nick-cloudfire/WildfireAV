@@ -1,53 +1,42 @@
 #!/usr/bin/env python3
 """
-Step 9 of runPipelineParallel: execute the Elmfire fire-spread simulation.
+Step "run_elmfire": run ELMFIRE on the case's ``*.data`` namelist.
 
-Finds the ``*.data`` namelist file in the case directory and runs the Elmfire
-executable (configurable via ``pipelineConfig.ELMFIRE_EXE``).
-
-Outputs (written by Elmfire itself)
-------------------------------------
-- outputs/time_of_arrival_<HHHH>.tif
+Output (written by ELMFIRE): outputs/time_of_arrival_*.tif
 """
 
+import time
 from pathlib import Path
 
 import pipelineConfig as cfg
+from common import fmt_duration, for_each_case, skipped
 from parallel_api import run_subprocess
 
-FIRE_ROOT  = cfg.FIRE_ROOT
-ELMFIRE_EXE = cfg.ELMFIRE_EXE
+
+def _toa(case_dir: Path) -> list[Path]:
+    outputs = case_dir / cfg.ELMFIRE_OUTPUTS_SUBDIR
+    return sorted(outputs.glob("time_of_arrival_*.tif")) if outputs.is_dir() else []
 
 
-def run_elmfire(case_dir: Path) -> None:
-    """Run Elmfire on the *.data file found in *case_dir*."""
-    case_dir  = Path(case_dir)
-    outputs   = case_dir / cfg.ELMFIRE_OUTPUTS_SUBDIR
-    if outputs.is_dir() and any(outputs.glob("time_of_arrival_*.tif")):
-        print(f"  Skipped — time_of_arrival output already exists.")
-        return
-    data_files = list(case_dir.glob("*.data"))
+def run_elmfire(case_dir: Path):
+    case_dir = Path(case_dir)
+    if _toa(case_dir):
+        return skipped("time_of_arrival output already exists")
+    data_files = sorted(case_dir.glob("*.data"))
     if not data_files:
-        raise FileNotFoundError(f"No *.data namelist file found in {case_dir}")
-    data_file = data_files[0]
+        raise FileNotFoundError(f"no *.data namelist in {case_dir} — run the elmfire_inputs step first")
 
-    print(f"  Running: {ELMFIRE_EXE} {data_file.name}")
-    run_subprocess(
-        [ELMFIRE_EXE, data_file.name],
-        cwd=case_dir,
-    )
+    print(f"  Running: {cfg.ELMFIRE_EXE} {data_files[0].name}")
+    t0 = time.monotonic()
+    run_subprocess([cfg.ELMFIRE_EXE, data_files[0].name], cwd=case_dir)
+    if not _toa(case_dir):
+        raise RuntimeError(f"ELMFIRE exited 0 but wrote no time_of_arrival_*.tif in "
+                           f"{case_dir / cfg.ELMFIRE_OUTPUTS_SUBDIR}")
+    print(f"  ELMFIRE finished in {fmt_duration(time.monotonic() - t0)}: {_toa(case_dir)[0].name}")
 
 
-def main(case_dir=None) -> None:
-    if case_dir is not None:
-        run_elmfire(Path(case_dir))
-        return
-
-    root = Path(FIRE_ROOT)
-    for folder in sorted(root.iterdir()):
-        if folder.is_dir() and folder.name.isdigit():
-            print(f"\nFolder {folder.name}:")
-            run_elmfire(folder)
+def main(case_dir=None):
+    return for_each_case(run_elmfire, case_dir)
 
 
 if __name__ == "__main__":

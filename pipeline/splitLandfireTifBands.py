@@ -1,81 +1,44 @@
-# splitLandfireTifBands.py
 """
-Step 2 of runPipelineParallel: split LANDFIRE.tif into individual band files.
+Step "split_bands": split LANDFIRE.tif into one GeoTIFF per band.
 
-The LFPS download produces a single multi-band GeoTIFF.  Band order matches
-the Layer_List submitted in getLandfireProductsForFireSim.py and is reflected
-in pipelineConfig.LANDFIRE_BAND_FILE_NAMES:
-
-    Band 1 → dem.tif   (ELEV2020)
-    Band 2 → slp.tif   (SLPD2020)
-    Band 3 → asp.tif   (ASP2020)
-    Band 4 → fbfm40.tif
-    Band 5 → cc.tif
-    Band 6 → ch.tif
-    Band 7 → cbh.tif
-    Band 8 → cbd.tif
-
-Output: inputs/<band_name>.tif  (single-band GeoTIFF, same CRS/transform as source)
+Band order matches the LFPS Layer_List (getLandfireProductsForFireSim.py) and
+``pipelineConfig.LANDFIRE_BAND_FILE_NAMES``:
+dem, slp, asp, fbfm40, cc, ch, cbh, cbd  ->  inputs/<name>.tif
 """
 
 from pathlib import Path
 
 import rasterio
 
-import pipelineConfig
+import pipelineConfig as cfg
+from common import atomic_write, for_each_case, require, skipped
 
-FIREPAIRS_ROOT  = pipelineConfig.FIRE_ROOT
-INPUTS_SUBDIR   = pipelineConfig.INPUTS_SUBDIR_NAME
-BAND_FILE_NAMES = pipelineConfig.LANDFIRE_BAND_FILE_NAMES
+BAND_FILE_NAMES = cfg.LANDFIRE_BAND_FILE_NAMES
 
 
-def process_folder(folder: Path) -> None:
+def _process(folder: Path):
     tif_path = folder / "LANDFIRE.tif"
-    if not tif_path.exists():
-        print(f"  No LANDFIRE.tif in {folder}, skipping.")
-        return
-
-    inputs_dir = folder / INPUTS_SUBDIR
+    require(tif_path, hint="run the landfire step first")
+    inputs_dir = folder / cfg.INPUTS_SUBDIR_NAME
     inputs_dir.mkdir(parents=True, exist_ok=True)
+    outs = [inputs_dir / f"{name}.tif" for name in BAND_FILE_NAMES]
+    if all(p.exists() for p in outs):
+        return skipped("band files already exist")
 
-    first_band = inputs_dir / f"{BAND_FILE_NAMES[0]}.tif"
-    if first_band.exists():
-        print(f"  Skipped — {first_band.name} already exists.")
-        return
-
-    print(f"\nSplitting {tif_path} …")
     with rasterio.open(tif_path) as src:
-        band_count = src.count
-        if band_count < len(BAND_FILE_NAMES):
-            print(
-                f"  Warning: expected ≥{len(BAND_FILE_NAMES)} bands "
-                f"but raster has {band_count}. Splitting available bands only."
-            )
-
-        base_profile = src.profile.copy()
-        base_profile.update(
-            count=1, driver="GTiff",
-            compress="lzw", tiled=True, bigtiff="IF_SAFER",
-        )
-
-        for band_idx, name in enumerate(BAND_FILE_NAMES, start=1):
-            if band_idx > band_count:
-                break
-            out_path = inputs_dir / f"{name}.tif"
-            data = src.read(band_idx)
-            with rasterio.open(out_path, "w", **base_profile) as dst:
-                dst.write(data, 1)
-            print(f"  Band {band_idx} → {out_path.name}")
+        if src.count < len(BAND_FILE_NAMES):
+            raise ValueError(f"{tif_path.name} has {src.count} bands, expected {len(BAND_FILE_NAMES)} "
+                             f"({', '.join(BAND_FILE_NAMES)}) — delete it to re-download")
+        profile = {k: v for k, v in src.profile.items() if k not in ("blockxsize", "blockysize")}
+        profile.update(count=1, driver="GTiff", compress="lzw", tiled=True, bigtiff="IF_SAFER")
+        for band_idx, out_path in enumerate(outs, start=1):
+            with atomic_write(out_path) as tmp, rasterio.open(tmp, "w", **profile) as dst:
+                dst.write(src.read(band_idx), 1)
+        print(f"  {src.width}x{src.height} @ {src.res[0]:.0f} m -> {', '.join(p.name for p in outs)}")
 
 
-def main(case_dir=None) -> None:
-    if case_dir is not None:
-        process_folder(Path(case_dir))
-        return
-
-    root = Path(FIREPAIRS_ROOT)
-    for folder in sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit()):
-        process_folder(folder)
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
 
 
 if __name__ == "__main__":

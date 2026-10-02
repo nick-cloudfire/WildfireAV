@@ -30,17 +30,16 @@ Data/
 
 # Per-case simulation pipeline (run in parallel)
 ├── pipeline/
-│   ├── runPipelineParallel.py         ← orchestrates per-case steps (see below)
-│   ├── runBatch.py                    ← parallel batch runner
+│   ├── runPipelineParallel.py         ← per-case driver: step plan, pipeline.log, status.json
+│   ├── runBatch.py                    ← parallel batch runner (one process per case)
+│   ├── preflight.py                   ← environment checks run before a batch
+│   ├── common.py                      ← helpers shared by the steps (skip/require/progress/…)
 │   ├── getLandfireProductsForFireSim.py ← step 1:  download LANDFIRE from LFPS
 │   ├── splitLandfireTifBands.py       ← step 2:  split multi-band LANDFIRE.tif
 │   ├── makePhiAndAdjFiles.py          ← step 3:  create adj/phi rasters
 │   ├── downloadWeatherData.py         ← step 4:  fetch ERA5 weather (OpenMeteo)
-│   ├── downloadAndRunWindninja_WXS.py ← step 5a: WindNinja (WINDNINJA_SOURCE=install)
-│   ├── downloadAndRunWindninja_hrrr.py ← step 5:  WindNinja initialised from locally downloaded HRRR (WINDNINJA_MODE=hrrrLocal, default)
-│   ├── downloadHrrr.py                ← helper: byte-range HRRR download + crop to DEM
-│   ├── downloadAndRunWindninja_wxModel.py ← step 5b: WindNinja wx-model variant
-│   ├── downloadAndRunWindninja.py     ← step 5c: WindNinja (legacy)
+│   ├── runWindninja.py                ← step 5:  WindNinja (WINDNINJA_MODE = hrrrLocal | wxModel | wxsFile)
+│   ├── downloadHrrr.py                ← helper: byte-range HRRR download → WindNinja pastcast zip
 │   ├── wn_to_geotiff.py               ← helper: convert WindNinja ASCII → GeoTIFF
 │   ├── applyNelsonModel.py            ← step 6:  compute dead-fuel moisture
 │   ├── getBarrierFile.py              ← step 7:  rasterise road/water barriers
@@ -57,7 +56,7 @@ Data/
 
 # Developer / debug utilities
 ├── tools/
-│   ├── monitorBatch.py                ← real-time batch progress monitor
+│   ├── monitorBatch.py                ← live status table from every case's status.json
 │   ├── prefetchLandfire.py            ← pre-fetch LANDFIRE for all cases
 │   ├── debugBandCounts.py             ← debug raster band counts per case
 │   ├── debugSatelliteEndTimes.py      ← inspect satellite coverage curves
@@ -150,9 +149,10 @@ directory of the same conda environment, e.g.:
 ELMFIRE_PATH_TO_GDAL = "/home/<user>/miniconda3/envs/elmfire/bin/"
 ```
 
-> **HRRR mode (`WINDNINJA_MODE = "hrrrLocal"`)** downloads only TMP/UGRD/VGRD/TCDC
-> from the public GCS HRRR archive (no credentials) and needs the `gdal_translate`
-> CLI on PATH to crop to the DEM (otherwise uncropped files are used). Set
+> **HRRR mode (`WINDNINJA_MODE = "hrrrLocal"`, default)** downloads only
+> TMP/UGRD/VGRD/TCDC from the public HRRR archive on Google Cloud (no
+> credentials needed), crops them to the case and hands them to WindNinja as a
+> `PASTCAST-GCP-HRRR-CONUS-3-KM_*.zip` via `forecast_filename`.  Set
 > `WINDNINJA_MODE = "wxsFile"` for the old domain-average behaviour.
 
 ### 5. Install WindNinja (optional — only needed for `WINDNINJA_SOURCE="install"`)
@@ -161,8 +161,10 @@ Follow the instructions in the [WindNinja Github](https://github.com/firelab/win
 Note that the pipeline was setup in Ubuntu-24.04, when asked to run scripts for 22.04, run the provided files for 24.04 instead.
 No need to install the GUI version. 
 
-Set `WINDNINJA_CONDA_ENV` in `pipelineConfig.py` to the environment name that
-has `WindNinja_cli` on its PATH (default `"base"`).
+By default (`WINDNINJA_CONDA_ENV = None`) `WindNinja_cli` is taken from PATH,
+i.e. the environment the pipeline runs in.  If it lives in a different conda
+environment, set `WINDNINJA_CONDA_ENV` to that name and it is called through
+`conda run -n <env>`.  `python pipeline/preflight.py` tells you which one it found.
 
 ### 6. Build or install the native Linux FARSITE binary
 
@@ -334,14 +336,18 @@ phase to begin from; all later phases also run automatically.
 # Regenerate PDF only (no simulation):
 ./runWildfireAV --start pdf
 
-# Parallel run with 8 workers, skip completed cases:
-./runWildfireAV --start run --workers 8 --skip-done
+# Resume after a timeout / crash: keep outputs, skip finished cases
+./runWildfireAV --start run --resume --workers 8
 
-# Process specific cases only:
-./runWildfireAV --start run --cases 00001 00005 00008
+# Process specific cases only (leading zeros optional):
+./runWildfireAV --start run --cases 1 5 8
+
+# What would run, and each case's last state / failing step:
+./runWildfireAV --start run --dry-run
 ```
 
-See `./runWildfireAV --help` for all options.
+See `./runWildfireAV --help` for all options, and
+[Running on an HPC](#running-on-an-hpc) for what the output looks like.
 
 ---
 
@@ -363,9 +369,13 @@ input data.
 
 ### Phase: run (`--start run`)
 
-Cleans per-case simulation outputs (from `landfire_bands` onwards), then
-executes the per-case simulation pipeline in parallel using
-`ProcessPoolExecutor`.  Step order depends on `WINDNINJA_SOURCE`:
+Runs the preflight checks, cleans per-case simulation outputs (from
+`landfire_bands` onwards — skipped with `--resume`), then runs every case in
+its own process, `--workers` at a time.  Every step skips itself when its
+outputs already exist (outputs are written atomically, so a killed case never
+leaves a half-written file behind), so re-running resumes where a case
+stopped.  `python pipeline/runPipelineParallel.py --list-steps` prints the
+active step plan, which depends on `WINDNINJA_SOURCE`:
 
 #### `WINDNINJA_SOURCE = "install"` (default)
 
@@ -374,7 +384,7 @@ Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
 Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
 Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
 Step 4   downloadWeatherData            →  inputs/weather.wxs
-Step 5   downloadAndRunWindninja        →  inputs/{ws,wd}.tif  (WindNinja)
+Step 5   runWindninja                   →  inputs/{ws,wd}.tif  (WindNinja)
 Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
 Step 7   getBarrierFile                 →  inputs/barrier.tif
 Step 8   createElmfireInputFiles        →  <case>.data
@@ -402,6 +412,48 @@ Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE w
 Step 12  runElmfireCase                 →  outputs/time_of_arrival_*.tif
 ```
 
+### Running on an HPC
+
+The batch log (terminal or SLURM `.out`) is designed to be read on its own:
+
+```
+PREFLIGHT
+  [  ok] exe elmfire            /home/me/bin/elmfire
+  [FAIL] net OpenMeteo          https://archive-api.open-meteo.com/v1/era5 (ConnectTimeout; needed by 40 case(s))
+  [warn] CPUs                   16 available (SLURM_CPUS_PER_TASK=16), 14 worker(s) x 1 thread(s)
+
+12:00:01  START  00012   [14 running, 86 queued]
+12:41:10  OK     00012   41m09s   [12/100 done, 1 failed, ETA ~5h10m]
+12:46:00  FAIL   00013   46m02s   [13/100 done, 2 failed, ETA ~5h05m]
+            at step windninja: RuntimeError: WindNinja chunk 1/2 failed (exit 1); see …/windninja_cli.log
+            log: /scratch/me/FirePairs/00013/pipeline.log
+12:50:00  ····  50m elapsed · 13/100 done, 2 failed, ETA ~5h · 14 running
+            00014   5/11 windninja        12m  HRRR download 180/312 h (3m40s)
+            00015  10/11 run_elmfire      31m
+```
+
+- **Preflight** (seconds) checks executables, `LFPS_EMAIL`, barrier datasets,
+  internet access to LFPS / OpenMeteo / HRRR (compute nodes often have none),
+  free disk and CPU oversubscription — only for what the cases still need.
+  `--no-preflight` skips it.
+- **Heartbeat** every `BATCH_HEARTBEAT_MIN` (`--heartbeat`) minutes: every
+  running case, its step and live progress.
+- **Final report**: counts, median/max time per step, failures grouped by
+  step with the exact `--cases …` to re-run them, and a
+  `run_summary_<timestamp>.csv` (per-case state, error, per-step seconds) in
+  `FIRE_ROOT`.
+- **Exit status**: 0 all ok, 1 some case failed (so `--dependency=afterok`
+  works), 2 preflight failed, 143 interrupted.
+- **Time limits**: on SIGTERM (SLURM time limit, `scancel`) running cases are
+  stopped, marked `interrupted` and queued ones are not started; add
+  `#SBATCH --signal=TERM@300` and resubmit with `--resume`.  A case killed
+  outright (out of memory) is reported as `killed by SIGKILL — most likely out
+  of memory` without affecting the others.
+- Each case writes a timestamped `pipeline.log` (including subprocess output)
+  and a `status.json`.  `python tools/monitorBatch.py` shows a live table from
+  them (`--once` for a single print, `--failed` for failures only); it also
+  flags `dead` cases whose process vanished.
+
 ### Phase: pdf (`--start pdf`)
 
 Generates `validation.pdf` in `FIRE_ROOT`.  The report contains one page per
@@ -427,10 +479,10 @@ Cleaning is integrated into the entry point:
 For fine-grained control use `cleanPipelineOutputs.py` directly:
 
 ```bash
-python cleanPipelineOutputs.py                          # dry-run by default
-python cleanPipelineOutputs.py --execute                # actually delete
-python cleanPipelineOutputs.py --from elmfire_outputs   # only ELMFIRE outputs
-python cleanPipelineOutputs.py --include-wind-tifs      # also delete ws/wd.tif
+python cleanPipelineOutputs.py --dry-run                     # show what would be deleted
+python cleanPipelineOutputs.py                               # everything after LANDFIRE.tif
+python cleanPipelineOutputs.py --from-step elmfire_outputs   # only ELMFIRE outputs
+python cleanPipelineOutputs.py --from-step windninja --include-wind-tifs --cases 00013
 ```
 
 ---
@@ -462,7 +514,8 @@ After a successful FARSITE run, outputs are cleaned automatically:
 ├── satellite_points.gpkg                hotspot points inside the burn polygon
 ├── LANDFIRE.tif                         raw multi-band download
 ├── 00001.data                           ELMFIRE namelist
-├── pipeline.log                         stdout/stderr from the pipeline run
+├── pipeline.log                         timestamped output of every step of the last run
+├── status.json                          live/last state: step, progress, per-step times, error
 ├── inputs/
 │   ├── dem.tif                          elevation (m)
 │   ├── slp.tif                          slope (degrees)
@@ -503,7 +556,7 @@ All settings are documented inline in `pipelineConfig.py`.
 
 | Section | Key settings |
 |---------|-------------|
-| 1. User-modifiable | `MIN/MAX_FIRE_YEAR`, `MTBS_AREA_THRESHOLD_ACRES`, `MAX_PARALLEL_CASES`, `WINDNINJA_SOURCE` |
+| 1. User-modifiable | `MIN/MAX_FIRE_YEAR`, `MTBS_AREA_THRESHOLD_ACRES`, `MAX_PARALLEL_CASES`, `BATCH_HEARTBEAT_MIN`, `PREFLIGHT_MIN_FREE_GB`, `WINDNINJA_SOURCE` |
 | 2. Paths | `FIRE_ROOT`, `BASE_VALIDATION`, `FARSITE_FB_DIR` |
 | 3. File/dir names | CSV names, shapefile names, subfolder names |
 | 4. Column names | master CSV column keys shared across scripts |
@@ -511,7 +564,7 @@ All settings are documented inline in `pipelineConfig.py`.
 | 6. LANDFIRE | band order, product names, raster naming |
 | 7. Satellite | coverage fraction, gap tolerance, buffer size |
 | 8. Weather | OpenMeteo URL and model |
-| 9. WindNinja | exe, model type, chunk size, output height, mesh resolution factor |
+| 9. WindNinja | `WINDNINJA_MODE`, conda env, chunk size, output height, mesh resolution factor, `HRRR_*` download settings |
 | 10. ELMFIRE | exe, GDAL path, simulation parameters, moisture content |
 | 11. FARSITE | `FARSITE_FB_DIR` (dir with Linux binary), `FARSITE_EXE_NAME` |
 | 12. Barrier | road/water widths, OSM field names |
@@ -542,8 +595,15 @@ All settings are documented inline in `pipelineConfig.py`.
   `pipeline.log` with the URL and response body.
 
 ### WindNinja fails
-- Confirm `WINDNINJA_CONDA_ENV` matches the conda environment with `WindNinja_cli` on PATH.
-- Check `inputs/windninja/chunk_000/windninja_cli.log` for the error message.
+- The last lines of `windninja_cli.log` are copied into `pipeline.log`; the
+  full log is in `inputs/windninja/chunk_NNN/` (or `step_NNN/` in wxsFile mode).
+- Exit 127 / "command not found": `WindNinja_cli` is not on PATH in the job's
+  environment — activate its env in the job script, or set `WINDNINJA_CONDA_ENV`.
+- `PROJ: proj_create_from_database: Open of …/share/proj failed`: the env's PROJ
+  database is not found; `export PROJ_DATA=$CONDA_PREFIX/share/proj` (older
+  PROJ: `PROJ_LIB`).
+- "Failed to connect to ninjastorm.firelab.org" is WindNinja's version check
+  and harmless on nodes without internet.
 - Ensure the DEM covers the full fire domain.
 
 ### FARSITE fails
@@ -578,11 +638,10 @@ All settings are documented inline in `pipelineConfig.py`.
   outside the LANDFIRE domain or the fuel download failed.
 
 ### Disk usage is excessive
-- WindNinja creates many `step_NNN/` subdirectories.  These are deleted
-  automatically by `wn_to_geotiff.clean_windninja_outputs()` after `ws.tif`
-  and `wd.tif` are built.  If a run was interrupted mid-step, re-run from the
-  `windninja` step: `python cleanPipelineOutputs.py --from windninja --execute`
-  then `./runWildfireAV --start run`.
+- WindNinja creates `chunk_NNN/` (or `step_NNN/`) subdirectories and an
+  `hrrr/` download cache.  These are deleted automatically after `ws.tif` and
+  `wd.tif` are built; an interrupted run keeps the HRRR cache and resumes with
+  `./runWildfireAV --start run --resume`.
 - All GeoTIFF outputs use LZW compression + tiling.
 
 ---
@@ -592,12 +651,20 @@ All settings are documented inline in `pipelineConfig.py`.
 - **`pipelineConfig.py` is the single source of truth.**  Never hard-code
   paths, filenames, or tunable numbers inside individual scripts.
 
-- **Each step script is independently runnable.**  Pass a `case_dir` argument
-  to `main()` for single-case testing, or omit it to process all cases under
-  `FIRE_ROOT`.
+- **Step contract** (see `pipeline/common.py`): every step module has
+  `main(case_dir=None)`.  With a case it processes that case and *raises* on
+  any problem (`require(...)` for missing inputs), returns `skipped(...)` when
+  its outputs already exist, writes its outputs with `atomic_write(...)`, and
+  reports progress of long operations with `progress(...)` (shown in the
+  heartbeat and monitor).  Without a case it loops over every case under
+  `FIRE_ROOT`.  The step order lives in `runPipelineParallel.plan()`.
 
-- **`parallel_api.py`** provides `Tee`, `make_logger`, `retry_call`, and
-  `run_subprocess`.  Import from here instead of reimplementing locally.
+- **Run one case by hand**: `python pipeline/runPipelineParallel.py /path/to/00012`
+  (prints to the terminal and `pipeline.log`), or a single step with
+  `python -c "import sys; sys.path[:0]=['.','pipeline']; import runWindninja; runWindninja.main('/path/to/00012')"`.
+
+- **`parallel_api.py`** provides `Tee`, `run_subprocess`, `retry_call` and
+  `get_thread_session`.  Import from here instead of reimplementing locally.
 
 - **`case_metadata.py`** handles all JSON serialisation of per-case metadata,
   including datetime normalisation.

@@ -8,6 +8,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import Affine
 
+from common import atomic_write
 from parallel_api import run_subprocess
 
 DT_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})_(\d{4})")  # MM-DD-YYYY_HHMM
@@ -35,10 +36,6 @@ def ordered_files(in_dir: Path, suffix: str) -> list[Path]:
         files.append((k, p))
     files.sort(key=lambda x: x[0])
     return [p for _, p in files]
-
-
-def run(cmd: list[str]) -> None:
-    run_subprocess(cmd)
 
 
 def _asc_extent(asc_path: Path) -> tuple[float, float, float, float]:
@@ -70,7 +67,7 @@ def _asc_extent(asc_path: Path) -> tuple[float, float, float, float]:
 def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
     files = ordered_files(in_dir, suffix)
     if not files:
-        raise SystemExit(f"No *_{suffix}.asc files with a MM-DD-YYYY_HHMM token found in {in_dir}")
+        raise RuntimeError(f"WindNinja produced no *_{suffix}.asc files (MM-DD-YYYY_HHMM) in {in_dir}")
 
     xmin, ymin, xmax, ymax = _asc_extent(files[0])
 
@@ -78,14 +75,14 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
         vrt = Path(tf.name)
 
     try:
-        run([
-            "gdalbuildvrt", "-separate",
+        run_subprocess([
+            "gdalbuildvrt", "-q", "-separate",
             "-resolution", "highest",
             "-te", str(xmin), str(ymin), str(xmax), str(ymax),
             str(vrt),
         ] + [str(p) for p in files])
-        run([
-            "gdal_translate", str(vrt), str(out_tif),
+        run_subprocess([
+            "gdal_translate", "-q", str(vrt), str(out_tif),
             "-of", "GTiff",
             "-co", "COMPRESS=lzw",
             "-co", "TILED=YES",
@@ -93,6 +90,7 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
         ])
     finally:
         vrt.unlink(missing_ok=True)
+    print(f"  {out_tif.name.lstrip('.').replace('.partial', '')}: {len(files)} hourly bands")
 
 def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
     """
@@ -158,7 +156,7 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
         dst.write(data)
 
     print(
-        f"  {action} {stack_tif.name}: "
+        f"  {action} {stack_tif.name.lstrip('.').replace('.partial', '')}: "
         f"rows {delta_rows:+d} (north), cols {delta_cols:+d} (east)"
     )
 
@@ -166,7 +164,7 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
 def clean_windninja_outputs(in_dir: Path):
     """Delete all per-step subdirectories and staged ASCII outputs.
 
-    WindNinja writes one ``step_NNN/`` directory per hourly run and stages a
+    WindNinja writes one ``step_NNN/`` / ``chunk_NNN/`` directory per run and stages a
     copy of each output back to *in_dir*.  After ws.tif / wd.tif have been
     built we no longer need any of this — delete everything except the two
     GeoTIFFs that live in the parent ``inputs/`` folder (not inside in_dir).
@@ -187,21 +185,23 @@ def clean_windninja_outputs(in_dir: Path):
 def main(in_dir, out_dir, reference_tif=None, clean=False):
     in_dir  = Path(in_dir)
     out_dir = Path(out_dir)
-    ws_tif  = out_dir / "ws.tif"
-    wd_tif  = out_dir / "wd.tif"
-
-    make_stack(in_dir, "vel", ws_tif)
-    make_stack(in_dir, "ang", wd_tif)
-
-    if reference_tif is not None:
-        ref = Path(reference_tif)
-        pad_to_reference(ws_tif, ref)
-        pad_to_reference(wd_tif, ref)
+    # wd first: ws.tif is the step's "done" marker, so it must appear last.
+    for suffix, name in (("ang", "wd.tif"), ("vel", "ws.tif")):
+        with atomic_write(out_dir / name) as tmp:
+            make_stack(in_dir, suffix, tmp)
+            if reference_tif is not None:
+                pad_to_reference(tmp, Path(reference_tif))
 
     if clean:
         clean_windninja_outputs(in_dir)
-    print("Done: ws.tif, wd.tif")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description="Stack WindNinja *_vel/_ang.asc grids into ws.tif / wd.tif")
+    ap.add_argument("in_dir")
+    ap.add_argument("out_dir")
+    ap.add_argument("--reference", help="raster whose shape the stacks are padded/cropped to")
+    ap.add_argument("--clean", action="store_true", help="delete the WindNinja workspace afterwards")
+    a = ap.parse_args()
+    main(a.in_dir, a.out_dir, a.reference, a.clean)

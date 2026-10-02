@@ -16,7 +16,7 @@ Steps (in pipeline order)
   elmfire_inputs   <case>/*.data
   elmfire_outputs  outputs/  scratch/
 
-pipeline.log is always removed when any step is cleaned.
+pipeline.log and status.json are always removed when any step is cleaned.
 
 By default ws.tif and wd.tif are NOT deleted when cleaning the windninja step,
 because regenerating them requires re-running all WindNinja hourly steps which
@@ -125,23 +125,18 @@ def _targets_for_case(case_dir: Path, steps: list[tuple], include_wind_tifs: boo
         if include_wind_tifs:
             for rel in wind_paths:
                 targets.append(case_dir / rel)
-    targets.append(case_dir / "pipeline.log")
+    targets += [case_dir / "pipeline.log", case_dir / "status.json"]
     return targets
 
 
-def _delete(path: Path, dry_run: bool) -> bool:
+def _delete(path: Path, dry_run: bool, verbose: bool = True) -> bool:
     """Delete a file or directory. Returns True if something was removed."""
     if not path.exists():
         return False
-    label = f"  {'[DRY RUN] ' if dry_run else ''}delete  {path}"
-    if path.is_dir():
-        print(label + "/")
-        if not dry_run:
-            shutil.rmtree(path)
-    else:
-        print(label)
-        if not dry_run:
-            path.unlink()
+    if verbose:
+        print(f"  {'[DRY RUN] ' if dry_run else ''}delete  {path}{'/' if path.is_dir() else ''}")
+    if not dry_run:
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
     return True
 
 

@@ -35,9 +35,11 @@ MIN_FIRE_YEAR               = 2024      # earliest fire year to process
 MAX_FIRE_YEAR               = 2025      # latest  fire year to process
 DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
 EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE download
-LANDFIRE_EMAIL              = os.environ["LFPS_EMAIL"]  # set in shell: export LFPS_EMAIL=you@example.com
+LANDFIRE_EMAIL              = os.environ.get("LFPS_EMAIL", "")  # export LFPS_EMAIL=you@example.com (checked by preflight)
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 14        # cases to run simultaneously in runBatch.py
+BATCH_HEARTBEAT_MIN         = 10        # minutes between batch progress heartbeats (0 = off)
+PREFLIGHT_MIN_FREE_GB       = 50        # warn when FIRE_ROOT has less free disk than this
 SETUP_PIPELINE_MAX_WORKERS  = 12        # parallel workers for getSatelliteEndTimes
 MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
 WINDNINJA_SOURCE            = "install"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
@@ -167,7 +169,7 @@ OPENMETEO_MODEL = "era5"
 WINDNINJA_MODE              = "hrrrLocal"           # "hrrrLocal" (HRRR downloaded locally) | "wxsFile" (domain-average from WXS) | "wxModel" (WindNinja downloads pastcast)
 WINDNINJA_SUBDIR            = "windninja"           # subfolder under inputs/
 WINDNINJA_CFG_FILENAME      = "windninja_config.cfg"
-WINDNINJA_CONDA_ENV         = "base"                # conda environment with WindNinja_cli
+WINDNINJA_CONDA_ENV         = None                  # None: WindNinja_cli from PATH (active env); or a conda env name for `conda run -n`
 WINDNINJA_WX_MODEL_TYPE     = "PASTCAST-GCP-HRRR-CONUS-3-KM"
 WINDNINJA_TIME_ZONE         = "UTC"
 WINDNINJA_MESH_UNITS        = "m"
