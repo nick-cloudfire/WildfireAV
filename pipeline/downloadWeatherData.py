@@ -1,264 +1,125 @@
 #!/usr/bin/env python3
 """
-Step 4 of runPipelineParallel: download ERA5 weather from OpenMeteo.
+Step "weather": hourly ERA5 weather from OpenMeteo -> inputs/weather.wxs.
 
-For each case, fetches hourly ERA5 data for the period
-[SatelliteIgnitionTime - CONDITIONING_DAYS, SatelliteEndTime]
-and writes:
-
-- inputs/weather.wxs   – RAWS-format text file consumed by WindNinja and Nelson
+Fetches [SatelliteIgnitionTime - CONDITIONING_DAYS, SatelliteEndTime] at the
+DEM centre and writes a RAWS-format .wxs file (metric) consumed by Nelson,
+FARSITE and WindNinja (wxsFile mode).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
-import requests
-import numpy as np
 import pandas as pd
 import rasterio
+import requests
 from pyproj import Transformer
 
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
+from common import atomic_write, case_window, for_each_case, require, skipped
 from parallel_api import get_thread_session, retry_call
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-FIRE_ROOT     = cfg.FIRE_ROOT
-DEM_NAME      = cfg.LANDFIRE_BAND_FILE_NAMES[0] + ".tif"
-INPUTS_FOLDER = cfg.INPUTS_SUBDIR_NAME
-OPENMETEO_URL = cfg.OPENMETEO_URL
-FOLDER_COL    = cfg.WS_WD_FOLDER_COL
-START_COL     = cfg.WS_WD_START_COL
-END_COL       = cfg.WS_WD_END_COL
-CSV_PATH      = cfg.FIRE_SUMMARY_SAT_CSV_PATH   # full path under FIRE_ROOT_LOGIN_NODE
-WXS_NAME      = cfg.WXS_FILE_NAME
-DAYS_BEFORE   = cfg.CONDITIONING_DAYS
-
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class WeatherTask:
-    folder_name: str
-    dem_path: Path
-    wxs_path: Path
-    inputs_dir: Path
-    lat: float
-    lon: float
-    center_elev_m: float
-    start_time: pd.Timestamp   # already offset by -DAYS_BEFORE
-    end_time: pd.Timestamp
+DEM_NAME = cfg.LANDFIRE_BAND_FILE_NAMES[0] + ".tif"
+VARIABLES = ["temperature_2m", "relative_humidity_2m", "precipitation",
+             "wind_speed_10m", "wind_direction_10m", "cloud_cover"]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _derive_lat_lon_elev(dem_path: Path) -> tuple[float, float, float]:
-    """Return (lat, lon, elevation_m) from the centre pixel of a DEM."""
+def _dem_centre(dem_path: Path) -> tuple[float, float, float]:
+    """Return (lat, lon, elevation_m) of the DEM centre pixel."""
     with rasterio.open(dem_path) as ds:
-        row = ds.height // 2
-        col = ds.width // 2
-        elev_val = float(ds.read(1)[row, col])
+        row, col = ds.height // 2, ds.width // 2
+        elev = float(ds.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
         x, y = ds.xy(row, col)
-        if getattr(ds.crs, "is_geographic", False):
-            return float(y), float(x), elev_val
-        transformer = Transformer.from_crs(ds.crs, "EPSG:4326", always_xy=True)
-        lon, lat = transformer.transform(x, y)
-        return float(lat), float(lon), elev_val
+        if ds.crs.is_geographic:
+            return float(y), float(x), elev
+        lon, lat = Transformer.from_crs(ds.crs, "EPSG:4326", always_xy=True).transform(x, y)
+    return float(lat), float(lon), elev
 
 
-def _fetch_hourly(task: WeatherTask) -> tuple[pd.DatetimeIndex, dict]:
+def _fetch_hourly(lat: float, lon: float, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     params = {
-        "latitude":  task.lat,
-        "longitude": task.lon,
-        "start_date": task.start_time.date().isoformat(),
-        "end_date":   task.end_time.date().isoformat(),
-        "hourly": ",".join([
-            "temperature_2m",
-            "relative_humidity_2m",
-            "precipitation",
-            "wind_speed_10m",
-            "wind_direction_10m",
-            "cloud_cover",
-        ]),
-        "timezone": "UTC",
-        "model": cfg.OPENMETEO_MODEL,
+        "latitude": lat, "longitude": lon,
+        "start_date": start.date().isoformat(), "end_date": end.date().isoformat(),
+        "hourly": ",".join(VARIABLES), "timezone": "UTC", "model": cfg.OPENMETEO_MODEL,
     }
     s = get_thread_session()
 
     def _do():
-        r = s.get(OPENMETEO_URL, params=params, timeout=60)
+        r = s.get(cfg.OPENMETEO_URL, params=params, timeout=60)
         if r.status_code in (429, 502, 503, 504):
-            raise requests.RequestException(
-                f"[{task.folder_name}] Transient HTTP {r.status_code} — retrying"
-            )
+            raise requests.RequestException(f"transient HTTP {r.status_code} from OpenMeteo")
         if not r.ok:
-            raise RuntimeError(
-                f"[{task.folder_name}] OpenMeteo request failed\n"
-                f"  URL: {r.url}\n"
-                f"  Status: {r.status_code}\n"
-                f"  Body: {r.text[:500]}"
-            )
+            raise RuntimeError(f"OpenMeteo HTTP {r.status_code} for {r.url}: {r.text[:300]}")
         data = r.json()
         if "hourly" not in data:
-            raise RuntimeError(
-                f"OpenMeteo response missing 'hourly'. Full response: {data}"
-            )
-        return data
+            raise RuntimeError(f"OpenMeteo response has no 'hourly' block: {str(data)[:300]}")
+        return data["hourly"]
 
-    # Longer backoff for rate limiting: 5s → 10s → 20s → 40s → 60s
-    data = retry_call(_do, tries=6, base_sleep_s=5.0, max_sleep_s=60.0)
-    hourly = data["hourly"]
-    times = pd.to_datetime(hourly["time"])
-    return times, hourly
+    # Rate limiting needs long back-off: 5, 10, 20, 40, 60 s
+    hourly = retry_call(_do, tries=6, base_sleep_s=5.0, max_sleep_s=60.0, log=print)
+    df = pd.DataFrame(hourly)
+    df["time"] = pd.to_datetime(df["time"])
+    return df
 
 
-def _write_wxs(
-    df: pd.DataFrame,
-    out_path: Path,
-    elevation_m: float,
-    start_time: pd.Timestamp,
-    end_time: pd.Timestamp,
-) -> None:
-    """Write a RAWS-format .wxs file from an OpenMeteo hourly DataFrame."""
-    elev_int = int(round(elevation_m))
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(f"RAWS_ELEVATION: {elev_int}\n")
-        f.write("RAWS_UNITS: METRIC\n")
-        f.write("RAWS_WINDS: OpenMeteo_ERA5_center_of_DEM\n")
-        f.write("Year Mth Day Time Temp RH HrlyPcp WindSpd WindDir CloudCov\n")
-        # Snap boundaries to hour floors so record count is independent of
-        # the minute component of start/end times.
-        start_hour = start_time.replace(minute=0, second=0, microsecond=0)
-        end_hour   = (end_time + pd.Timedelta(hours=1)).replace(
-                         minute=0, second=0, microsecond=0)
-        for _, row in df.iterrows():
-            t = pd.to_datetime(row["time"]).to_pydatetime()
-            if not (start_hour <= t <= end_hour):
-                continue
-            time_int  = t.hour * 100 + t.minute
-            temp_int  = int(round(float(row["temperature_2m"])))
-            rh_int    = max(0, min(99, int(round(float(row["relative_humidity_2m"])))))
-            precip_mm = float(row["precipitation"])
-            wspd_int  = int(round(float(row["wind_speed_10m"])))
-            wdir_int  = int(round(float(row["wind_direction_10m"]))) % 360
-            cloud_int = max(0, min(100, int(round(float(row["cloud_cover"])))))
-            f.write(
-                f"{t.year:4d} {t.month:2d} {t.day:2d} "
-                f"{time_int:04d} "
-                f"{temp_int:4d} {rh_int:3d} "
-                f"{precip_mm:7.3f} "
-                f"{wspd_int:3d} {wdir_int:3d} {cloud_int:3d}\n"
-            )
-
-
-def _task_from_row(row: pd.Series) -> WeatherTask | None:
-    folder_name = f"{int(row[FOLDER_COL]):05d}"
-    try:
-        start = pd.to_datetime(row[START_COL], utc=True).tz_localize(None)
-        end   = pd.to_datetime(row[END_COL],   utc=True).tz_localize(None)
-    except Exception as e:
-        print(f"[{folder_name}] Cannot parse times: {e}")
-        return None
-    dem_path = FIRE_ROOT / folder_name / INPUTS_FOLDER / DEM_NAME
-    if not dem_path.exists():
-        print(f"[{folder_name}] DEM not found: {dem_path}, skipping")
-        return None
-    lat, lon, elev = _derive_lat_lon_elev(dem_path)
-    inputs_dir = FIRE_ROOT / folder_name / INPUTS_FOLDER
-    return WeatherTask(
-        folder_name=folder_name,
-        dem_path=dem_path,
-        wxs_path=inputs_dir / WXS_NAME,
-        inputs_dir=inputs_dir,
-        lat=lat,
-        lon=lon,
-        center_elev_m=elev,
-        start_time=start - pd.Timedelta(days=DAYS_BEFORE),
-        end_time=end,
-    )
-
-
-def _task_from_case_dir(case_dir: Path) -> WeatherTask | None:
-    meta = read_case_metadata(case_dir)
-    try:
-        start = pd.to_datetime(meta[START_COL], utc=True).tz_localize(None)
-        end   = pd.to_datetime(meta[END_COL],   utc=True).tz_localize(None)
-    except Exception as e:
-        print(f"[{case_dir.name}] Cannot parse times from metadata: {e}")
-        return None
-    dem_path = case_dir / INPUTS_FOLDER / DEM_NAME
-    if not dem_path.exists():
-        print(f"[{case_dir.name}] DEM not found: {dem_path}, skipping")
-        return None
-    lat, lon, elev = _derive_lat_lon_elev(dem_path)
-    inputs_dir = case_dir / INPUTS_FOLDER
-    return WeatherTask(
-        folder_name=case_dir.name,
-        dem_path=dem_path,
-        wxs_path=inputs_dir / WXS_NAME,
-        inputs_dir=inputs_dir,
-        lat=lat,
-        lon=lon,
-        center_elev_m=elev,
-        start_time=start - pd.Timedelta(days=DAYS_BEFORE),
-        end_time=end,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Worker
-# ---------------------------------------------------------------------------
-
-def _worker(task: WeatherTask) -> tuple[str, str]:
-    try:
-        times, hourly = _fetch_hourly(task)
-        if len(times) == 0:
-            return (task.folder_name, "no data")
-        task.inputs_dir.mkdir(parents=True, exist_ok=True)
-        _write_wxs(
-            pd.DataFrame(hourly),
-            task.wxs_path,
-            task.center_elev_m,
-            task.start_time,
-            task.end_time,
+def _write_wxs(df: pd.DataFrame, out_path: Path, elevation_m: float) -> int:
+    """Write a RAWS .wxs file; returns the number of records."""
+    lines = [
+        f"RAWS_ELEVATION: {int(round(elevation_m))}",
+        "RAWS_UNITS: METRIC",
+        "RAWS_WINDS: OpenMeteo_ERA5_center_of_DEM",
+        "Year Mth Day Time Temp RH HrlyPcp WindSpd WindDir CloudCov",
+    ]
+    for r in df.itertuples(index=False):
+        t = r.time
+        lines.append(
+            f"{t.year:4d} {t.month:2d} {t.day:2d} {t.hour * 100 + t.minute:04d} "
+            f"{int(round(r.temperature_2m)):4d} {max(0, min(99, int(round(r.relative_humidity_2m)))):3d} "
+            f"{float(r.precipitation):7.3f} "
+            f"{int(round(r.wind_speed_10m)):3d} {int(round(r.wind_direction_10m)) % 360:3d} "
+            f"{max(0, min(100, int(round(r.cloud_cover)))):3d}"
         )
-        return (task.folder_name, "done")
-    except Exception as exc:
-        print(f"[{task.folder_name}] FAILED: {type(exc).__name__}: {exc}")
-        return (task.folder_name, "failed")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(lines) - 4
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+def _process(case_dir: Path):
+    inputs = case_dir / cfg.INPUTS_SUBDIR_NAME
+    wxs_path = inputs / cfg.WXS_FILE_NAME
+    if wxs_path.exists():
+        return skipped(f"{cfg.WXS_FILE_NAME} already exists")
+    dem_path = inputs / DEM_NAME
+    require(dem_path, hint="run the split_bands step first")
 
-def main(case_dir=None) -> None:
-    if case_dir is not None:
-        wxs = Path(case_dir) / INPUTS_FOLDER / WXS_NAME
-        if wxs.exists():
-            print(f"  Skipped — {WXS_NAME} already exists.")
-            return
-        task = _task_from_case_dir(Path(case_dir))
-        tasks = [] if task is None else [task]
-    else:
-        df = pd.read_csv(CSV_PATH)
-        for col in (FOLDER_COL, START_COL, END_COL):
-            if col not in df.columns:
-                raise KeyError(f"Missing column '{col}' in {CSV_PATH}")
-        tasks = [t for row in (df.iloc[i] for i in range(len(df))) if (t := _task_from_row(row)) is not None]
+    start, end = case_window(read_case_metadata(case_dir), cfg.WS_WD_START_COL, cfg.WS_WD_END_COL)
+    start = start - pd.Timedelta(days=cfg.CONDITIONING_DAYS)
+    lat, lon, elev = _dem_centre(dem_path)
+    print(f"  OpenMeteo {cfg.OPENMETEO_MODEL} at {lat:.4f}, {lon:.4f} (elev {elev:.0f} m): "
+          f"{start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M} UTC "
+          f"(incl. {cfg.CONDITIONING_DAYS} conditioning days)")
 
-    print(f"Prepared {len(tasks)} OpenMeteo requests")
-    results = [_worker(t) for t in tasks]
-    ok = sum(1 for _, status in results if status not in ("failed",))
-    print(f"Finished: {ok} ok, {len(results) - ok} failed/skipped")
+    df = _fetch_hourly(lat, lon, start, end)
+    # Snap to whole hours; keep through ceil(end) so downstream windows are complete.
+    lo, hi = start.floor("h"), (end + pd.Timedelta(hours=1)).floor("h")
+    df = df[(df.time >= lo) & (df.time <= hi)]
+    if df.empty:
+        raise RuntimeError(f"OpenMeteo returned no hours between {lo} and {hi}")
+    gaps = df[VARIABLES].isna().any(axis=1)
+    if gaps.any():
+        first = df.time[gaps].iloc[0]
+        raise RuntimeError(
+            f"OpenMeteo returned {int(gaps.sum())} hour(s) with missing values, first at {first} "
+            f"(ERA5 lags real time by ~5 days; is the fire too recent?)")
+
+    with atomic_write(wxs_path) as tmp:
+        n = _write_wxs(df, tmp, elev)
+    print(f"  Wrote {wxs_path.name}: {n} hourly records")
+
+
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ import rasterio
 from rasterio.warp import reproject, Resampling
 
 import pipelineConfig as cfg
+from common import atomic_write, for_each_case, skipped
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -121,7 +122,7 @@ def _fill_edge_nodata(data: np.ndarray, nodata: float) -> np.ndarray:
 # Public API
 # ---------------------------------------------------------------------------
 
-def main(case_dir: Path) -> None:
+def _process(case_dir: Path):
     """Extract ws.tif / wd.tif from FARSITE wind grids for *case_dir*."""
     case_dir   = Path(case_dir).absolute()
     wind_grids = case_dir / "farsite" / "outputs" / WIND_GRIDS_NAME
@@ -130,8 +131,7 @@ def main(case_dir: Path) -> None:
     wd_out     = case_dir / INPUTS / cfg.WD_TIF_NAME
 
     if ws_out.exists() and wd_out.exists():
-        print("  Skipped — ws.tif and wd.tif already exist.")
-        return
+        return skipped("ws.tif and wd.tif already exist")
 
     if not wind_grids.exists():
         raise FileNotFoundError(
@@ -202,11 +202,11 @@ def main(case_dir: Path) -> None:
         "bigtiff":   "IF_SAFER",
     }
 
-    with rasterio.open(ws_out, "w", **out_profile) as dst:
+    with atomic_write(ws_out) as tmp, rasterio.open(tmp, "w", **out_profile) as dst:
         dst.write(ws_data)
     print(f"  ws.tif  ({n_steps} bands)")
 
-    with rasterio.open(wd_out, "w", **out_profile) as dst:
+    with atomic_write(wd_out) as tmp, rasterio.open(tmp, "w", **out_profile) as dst:
         dst.write(wd_data)
     print(f"  wd.tif  ({n_steps} bands)")
 
@@ -215,11 +215,9 @@ def main(case_dir: Path) -> None:
     print(f"  Deleted {WIND_GRIDS_NAME}")
 
 
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
+
+
 if __name__ == "__main__":
-    from case_metadata import case_dirs
-    for d in sorted(case_dirs(Path(cfg.FIRE_ROOT))):
-        print(f"\n[{d.name}]")
-        try:
-            main(d)
-        except Exception as e:
-            print(f"  FAILED: {type(e).__name__}: {e}")
+    main()

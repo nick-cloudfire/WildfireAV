@@ -27,7 +27,8 @@ import geopandas as gpd
 import pandas as pd
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from parallel_api import make_logger, get_thread_session
+from common import SKIPPED, for_each_case, progress, require
+from parallel_api import get_thread_session
 from pyproj import CRS
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,9 @@ def _best_utm_crs(bounds) -> CRS:
 # ---------------------------------------------------------------------------
 
 def _submit_job(products: list[str], bbox: tuple, projection: int) -> str:
+    if not EMAIL:
+        raise RuntimeError("LFPS_EMAIL is not set (export LFPS_EMAIL=you@example.com, "
+                           "registered at https://lfps.usgs.gov)")
     params = {
         "Email":             EMAIL,
         "Layer_List":        ";".join(products),
@@ -208,7 +212,7 @@ def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
     Returns (folder_name, success, message).
     """
     if log is None:
-        log = make_logger(folder.name)
+        log = progress
 
     firescar = folder / FIRESCAR_NAME
     if not firescar.exists():
@@ -295,41 +299,14 @@ def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
 # main
 # ---------------------------------------------------------------------------
 
-def main(case_dir=None) -> None:
-    root = Path(FIREPAIRS_ROOT)
+def _process(folder: Path):
+    require(folder / FIRESCAR_NAME, hint="created by setupPipeline")
+    _, _, msg = process_folder(folder)
+    return SKIPPED if msg.startswith("skipped") else None
 
-    if case_dir is not None:
-        process_folder(Path(case_dir))
-        return
 
-    # Batch mode: load summary to get fire years without reading each metadata file
-    summary_path = cfg.FIRE_SUMMARY_CSV_PATH   # full path under FIRE_ROOT_LOGIN_NODE
-    summary_df = pd.read_csv(summary_path)
-    summary_df["folder"] = summary_df["folder"].astype(str).str.zfill(5)
-    summary_df["perim_ignition"] = pd.to_datetime(
-        summary_df["perim_ignition"], errors="coerce", utc=True
-    )
-    summary_df["fire_year"] = summary_df["perim_ignition"].dt.year
-    summary = summary_df.set_index("folder")
-
-    # Collect folders that still need work
-    todo = [
-        p for p in sorted(root.iterdir())
-        if p.is_dir() and p.name.isdigit()
-        and (p / FIRESCAR_NAME).exists()
-        and not (p / "LANDFIRE.tif").exists()
-    ]
-
-    print(f"Processing {len(todo)} folders …")
-
-    results = [process_folder(f, summary) for f in todo]
-
-    ok   = sum(1 for _, s, _ in results if s)
-    fail = len(results) - ok
-    print(f"\nFinished: {ok} ok, {fail} failed/skipped.")
-    for name, success, msg in sorted(results):
-        if not success:
-            print(f"  FAIL {name}: {msg}")
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
 
 
 if __name__ == "__main__":

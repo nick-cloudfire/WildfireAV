@@ -4,12 +4,10 @@ Shared utilities for the Elmfire validation pipeline.
 
 Exports
 -------
-Tee              – write to multiple streams simultaneously (for log tee-ing)
-make_logger      – create a thread-safe, timestamped print function
+Tee                – write to multiple streams simultaneously (for log tee-ing)
+run_subprocess     – run a command with its output routed through sys.stdout
 get_thread_session – per-thread requests.Session (connection reuse)
-retry_call       – exponential-backoff retry wrapper
-TaskOutcome      – dataclass for parallel-task results
-run_parallel     – ThreadPoolExecutor wrapper that returns TaskOutcomes
+retry_call         – exponential-backoff retry wrapper
 """
 
 from __future__ import annotations
@@ -17,18 +15,14 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
-import time
 import threading
-from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, TypeVar, Generic
+import time
+from typing import Callable, Optional, TypeVar
 
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-T = TypeVar("T")
 R = TypeVar("R")
 
-_PRINT_LOCK = threading.Lock()
 _thread_local = threading.local()
 
 
@@ -80,6 +74,9 @@ def run_subprocess(
     Use this instead of subprocess.run() for any process whose output should
     land in pipeline.log rather than leaking to the terminal.
     WindNinja is exempt — it writes to its own chunk log intentionally.
+
+    If the caller is interrupted (e.g. SIGTERM at a SLURM time limit) the child
+    is killed rather than left running.
     """
     try:
         sys.stdout.fileno()
@@ -101,29 +98,15 @@ def run_subprocess(
             **kwargs,
         ) as proc:
             assert proc.stdout is not None
-            for line in proc.stdout:
-                print(line, end="", flush=True)
+            try:
+                for line in proc.stdout:
+                    print(line, end="", flush=True)
+            except BaseException:
+                proc.kill()
+                raise
         if check and proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
         return subprocess.CompletedProcess(cmd, proc.returncode)
-
-
-# ---------------------------------------------------------------------------
-# make_logger – thread-safe timestamped logging
-# ---------------------------------------------------------------------------
-
-def make_logger(prefix: str = "") -> Callable[[str], None]:
-    """Return a thread-safe logger that prepends a timestamp and optional prefix."""
-    pfx = f"[{prefix}] " if prefix else ""
-
-    def log(msg: str = "") -> None:
-        ts = time.strftime("%H:%M:%S")
-        lines = str(msg).splitlines() or [""]
-        with _PRINT_LOCK:
-            for line in lines:
-                print(f"{ts} {pfx}{line}", flush=True)
-
-    return log
 
 
 # ---------------------------------------------------------------------------
@@ -179,54 +162,3 @@ def retry_call(
 
     assert last_exc is not None
     raise last_exc
-
-
-# ---------------------------------------------------------------------------
-# TaskOutcome / run_parallel
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TaskOutcome(Generic[T, R]):
-    """Result of one parallel task."""
-    item: T
-    ok: bool
-    result: Optional[R] = None
-    error: Optional[str] = None
-
-
-def run_parallel(
-    items: Iterable[T],
-    worker_fn: Callable[[T], R],
-    *,
-    max_workers: int = 8,
-    log: Optional[Callable[[str], None]] = None,
-) -> List[TaskOutcome[T, R]]:
-    """
-    Run *worker_fn* over *items* using a ThreadPoolExecutor.
-
-    Returns a list of :class:`TaskOutcome` objects (one per item) in
-    completion order.
-    """
-    items = list(items)
-    if not items:
-        return []
-
-    if log:
-        log(f"Submitting {len(items)} tasks with max_workers={max_workers}")
-
-    out: List[TaskOutcome[T, R]] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        fut_to_item = {ex.submit(worker_fn, it): it for it in items}
-        for fut in as_completed(fut_to_item):
-            it = fut_to_item[fut]
-            try:
-                res = fut.result()
-                out.append(TaskOutcome(item=it, ok=True, result=res))
-            except Exception as e:
-                out.append(TaskOutcome(item=it, ok=False, error=f"{type(e).__name__}: {e}"))
-
-    if log:
-        ok = sum(o.ok for o in out)
-        log(f"Finished: {ok} ok, {len(out) - ok} failed")
-
-    return out

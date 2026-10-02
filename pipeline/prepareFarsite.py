@@ -30,11 +30,10 @@ import fiona
 import numpy as np
 import rasterio
 from rasterio.transform import Affine
-from rasterio.transform import xy as transform_xy
 from rasterio.warp import reproject, Resampling as RioResampling
-from rasterio.windows import Window
 
 import pipelineConfig as cfg
+from common import for_each_case, require, skipped, snap_to_valid_fuel
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -60,6 +59,14 @@ DECIMALS    = 0
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _run(cmd: list[str]) -> str:
+    """Run a GDAL/OGR command; on failure raise with its stderr (not swallowed)."""
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} failed (exit {r.returncode}): {r.stderr.strip()[-500:]}")
+    return r.stdout
+
 
 def _read_band(path: Path):
     with rasterio.open(path) as ds:
@@ -124,62 +131,6 @@ def _burn_period_lines(start_dt, end_dt):
     return lines
 
 
-def _is_valid_fuel(val, nodata, valid_min: float = 101.0) -> bool:
-    if val is None:
-        return False
-    if nodata is not None and val == nodata:
-        return False
-    try:
-        if np.isnan(val):
-            return False
-    except Exception:
-        pass
-    return val >= valid_min
-
-
-def _snap_to_valid_fuel(
-    fuels_tif: Path,
-    x: float,
-    y: float,
-    valid_min: float = 101.0,
-    max_radius_cells: int = 2000,
-) -> tuple[float, float, bool]:
-    """Snap (x, y) to the centre of the nearest pixel with fuel code >= valid_min."""
-    with rasterio.open(fuels_tif) as ds:
-        row0, col0 = ds.index(x, y)
-        row0 = min(max(row0, 0), ds.height - 1)
-        col0 = min(max(col0, 0), ds.width - 1)
-
-        v0 = ds.read(1, window=Window(col0, row0, 1, 1), masked=False)[0, 0]
-        if _is_valid_fuel(v0, ds.nodata, valid_min):
-            xc, yc = transform_xy(ds.transform, row0, col0, offset="center")
-            return float(xc), float(yc), False
-
-        for r in range(1, max_radius_cells + 1):
-            r0 = max(row0 - r, 0)
-            r1 = min(row0 + r, ds.height - 1)
-            c0 = max(col0 - r, 0)
-            c1 = min(col0 + r, ds.width - 1)
-            arr = ds.read(1, window=Window(c0, r0, c1 - c0 + 1, r1 - r0 + 1), masked=False)
-            valid = arr >= valid_min
-            if ds.nodata is not None:
-                valid &= arr != ds.nodata
-            if np.issubdtype(arr.dtype, np.floating):
-                valid &= ~np.isnan(arr)
-            if not np.any(valid):
-                continue
-            vrows, vcols = np.where(valid)
-            rows, cols = vrows + r0, vcols + c0
-            d2 = (rows - row0) ** 2 + (cols - col0) ** 2
-            k = int(np.argmin(d2))
-            xc, yc = transform_xy(ds.transform, int(rows[k]), int(cols[k]), offset="center")
-            return float(xc), float(yc), True
-
-    raise RuntimeError(
-        f"No valid fuel (>= {valid_min}) within {max_radius_cells} cells of ignition"
-    )
-
-
 def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path) -> bool:
     """Snap the ignition shapefile point to the nearest valid fuel cell in-place.
 
@@ -197,7 +148,7 @@ def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path) -> bool:
     coords = feat["geometry"]["coordinates"]
     x, y   = float(coords[0]), float(coords[1])
 
-    x_snap, y_snap, moved = _snap_to_valid_fuel(fuels_tif, x, y)
+    x_snap, y_snap, moved = snap_to_valid_fuel(fuels_tif, x, y)
     if not moved:
         return False
 
@@ -297,15 +248,13 @@ def _build_wind_grids(
 # Public API
 # ---------------------------------------------------------------------------
 
-def main(case_dir: Path) -> None:
+def _process(case_dir: Path):
     """Prepare all FARSITE inputs for *case_dir*.  Skips if already done."""
-    case_dir      = Path(case_dir)
     farsite_dir   = case_dir / "farsite"
     farsite_input = farsite_dir / "farsite.input"
 
     if farsite_input.exists():
-        print(f"[{case_dir.name}] Skipped — farsite.input already exists")
-        return
+        return skipped("farsite.input already exists")
 
     # ---- required inputs check ----------------------------------------
     required = [
@@ -324,12 +273,7 @@ def main(case_dir: Path) -> None:
             case_dir / INPUTS / cfg.BARRIER_BACKUP_CLIP_NAME,
         ]) if USE_BARRIER else []),
     ]
-    missing = [p for p in required if not p.exists()]
-    if missing:
-        print(f"[{case_dir.name}] Skipped — missing: {', '.join(p.name for p in missing)}")
-        return
-
-    print(f"[{case_dir.name}] Preparing FARSITE inputs")
+    require(*required, hint="produced by earlier steps")
 
     landfire    = case_dir / "LANDFIRE.tif"
     lcp_out     = farsite_dir / "landscape.lcp"
@@ -344,9 +288,9 @@ def main(case_dir: Path) -> None:
     (farsite_dir / "outputs").mkdir()
 
     # ---- landscape.lcp + .prj ------------------------------------------
-    subprocess.run(
+    _run(
         [
-            "gdal_translate", "-of", "LCP",
+            "gdal_translate", "-q", "-of", "LCP",
             str(landfire), str(lcp_out),
             "-co", "LINEAR_UNIT=SET_FROM_SRS",
             "-co", "ELEVATION_UNIT=METERS",
@@ -354,17 +298,13 @@ def main(case_dir: Path) -> None:
             "-co", "ASPECT_UNIT=AZIMUTH_DEGREES",
             "-co", "CANOPY_COV_UNIT=PERCENT",
         ],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    prj_text = subprocess.check_output(
-        ["gdalsrsinfo", "-o", "wkt_esri", str(landfire)],
-        text=True, stderr=subprocess.DEVNULL,
-    )
+    prj_text = _run(["gdalsrsinfo", "-o", "wkt_esri", str(landfire)])
     prj_out.write_text(prj_text)
     print("  landscape.lcp + .prj")
 
     # ---- ignition.shp --------------------------------------------------
-    subprocess.run(
+    _run(
         [
             "ogr2ogr", "-f", "ESRI Shapefile",
             str(farsite_dir / "ignition.shp"),
@@ -373,7 +313,6 @@ def main(case_dir: Path) -> None:
             "-t_srs", str(prj_out),
             "-overwrite",
         ],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     fuels_tif = (case_dir / INPUTS / FBFM_FILENAME).with_suffix(".tif")
     snapped   = _snap_ignition_shp(farsite_dir / "ignition.shp", fuels_tif)
@@ -391,7 +330,7 @@ def main(case_dir: Path) -> None:
             if i > 0:
                 cmd += ["-update", "-append"]
             cmd += [str(barrier_shp), str(src)]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _run(cmd)
         print("  barrier.shp")
 
     # ---- weather.wxs (trim conditioning days) --------------------------
@@ -518,8 +457,10 @@ def _write_run_all(fire_root: Path) -> None:
     print(f"\nWrote {len(lines)} entries to {out}")
 
 
+def main(case_dir=None):
+    return for_each_case(_process, case_dir)
+
+
 if __name__ == "__main__":
-    for case_dir in sorted(FIRE_ROOT.iterdir()):
-        if case_dir.is_dir() and case_dir.name.isdigit():
-            main(case_dir)
+    main()
     _write_run_all(FIRE_ROOT)

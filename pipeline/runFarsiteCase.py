@@ -22,9 +22,11 @@ Standalone usage (process all cases under FIRE_ROOT):
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pipelineConfig as cfg
+from common import fmt_duration, for_each_case, skipped
 from parallel_api import run_subprocess
 
 # ---------------------------------------------------------------------------
@@ -41,7 +43,7 @@ ARRIVAL_TIME_TIF = "farsite_Arrival Time.tif"   # completion sentinel
 # Public API
 # ---------------------------------------------------------------------------
 
-def run_farsite(case_dir: Path) -> None:
+def run_farsite(case_dir: Path):
     """Run FARSITE for *case_dir*.  Skips if outputs already exist."""
     case_dir    = Path(case_dir).absolute()
     farsite_dir = case_dir / "farsite"
@@ -49,8 +51,7 @@ def run_farsite(case_dir: Path) -> None:
     sentinel    = outputs_dir / ARRIVAL_TIME_TIF
 
     if sentinel.exists():
-        print(f"  Skipped — FARSITE outputs already exist.")
-        return
+        return skipped("FARSITE outputs already exist")
 
     cmd_file = farsite_dir / "farsite.txt"
     if not cmd_file.exists():
@@ -61,7 +62,10 @@ def run_farsite(case_dir: Path) -> None:
 
     # ---- run ------------------------------------------------------------
     wine_env = {**os.environ, "WINEDEBUG": "-all"}
+    if not FARSITE_EXE.exists():
+        raise FileNotFoundError(f"FARSITE binary not found: {FARSITE_EXE} (FARSITE_FB_DIR / FARSITE_EXE_NAME)")
     print(f"  Running: wine64 {FARSITE_EXE.name} farsite.txt")
+    t0 = time.monotonic()
     run_subprocess(
         ["wine64", str(FARSITE_EXE), "farsite.txt"],
         cwd=str(farsite_dir),
@@ -69,7 +73,7 @@ def run_farsite(case_dir: Path) -> None:
     )
 
     if sentinel.exists():
-        print(f"  FARSITE complete — outputs in {outputs_dir}")
+        print(f"  FARSITE finished in {fmt_duration(time.monotonic() - t0)} — outputs in {outputs_dir}")
     else:
         raise RuntimeError(
             f"FARSITE finished but '{ARRIVAL_TIME_TIF}' was not created. "
@@ -87,15 +91,8 @@ def run_farsite(case_dir: Path) -> None:
     print(f"  Cleaned farsite outputs: kept {sorted(keep)}, removed {removed} file(s)")
 
 
-def main(case_dir=None) -> None:
-    if case_dir is not None:
-        run_farsite(Path(case_dir))
-        return
-
-    for folder in sorted(FIRE_ROOT.iterdir()):
-        if folder.is_dir() and folder.name.isdigit():
-            print(f"\nFolder {folder.name}:")
-            run_farsite(folder)
+def main(case_dir=None):
+    return for_each_case(run_farsite, case_dir)
 
 
 if __name__ == "__main__":

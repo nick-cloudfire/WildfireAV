@@ -210,7 +210,7 @@ def _wxs_avg_wind_kph(case_dir: Path, meta: dict | None = None) -> float | None:
     """Return mean wind speed (kph) from the WXS file over the fire window.
 
     The fire window is defined by SatelliteIgnitionTime → SatelliteEndTime from
-    case metadata (mirroring the logic in downloadAndRunWindninja_WXS.py).
+    case metadata (mirroring the wxsFile window in pipeline/runWindninja.py).
     Falls back to the full file average if the window cannot be determined.
     Pass *meta* (already loaded by the caller) to avoid a redundant file read.
     """
