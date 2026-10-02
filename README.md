@@ -37,6 +37,8 @@ Data/
 │   ├── makePhiAndAdjFiles.py          ← step 3:  create adj/phi rasters
 │   ├── downloadWeatherData.py         ← step 4:  fetch ERA5 weather (OpenMeteo)
 │   ├── downloadAndRunWindninja_WXS.py ← step 5a: WindNinja (WINDNINJA_SOURCE=install)
+│   ├── downloadAndRunWindninja_hrrr.py ← step 5:  WindNinja initialised from locally downloaded HRRR (WINDNINJA_MODE=hrrrLocal, default)
+│   ├── downloadHrrr.py                ← helper: byte-range HRRR download + crop to DEM
 │   ├── downloadAndRunWindninja_wxModel.py ← step 5b: WindNinja wx-model variant
 │   ├── downloadAndRunWindninja.py     ← step 5c: WindNinja (legacy)
 │   ├── wn_to_geotiff.py               ← helper: convert WindNinja ASCII → GeoTIFF
@@ -147,6 +149,11 @@ directory of the same conda environment, e.g.:
 ```python
 ELMFIRE_PATH_TO_GDAL = "/home/<user>/miniconda3/envs/elmfire/bin/"
 ```
+
+> **HRRR mode (`WINDNINJA_MODE = "hrrrLocal"`)** downloads only TMP/UGRD/VGRD/TCDC
+> from the public GCS HRRR archive (no credentials) and needs the `gdal_translate`
+> CLI on PATH to crop to the DEM (otherwise uncropped files are used). Set
+> `WINDNINJA_MODE = "wxsFile"` for the old domain-average behaviour.
 
 ### 5. Install WindNinja (optional — only needed for `WINDNINJA_SOURCE="install"`)
 

@@ -164,7 +164,7 @@ OPENMETEO_MODEL = "era5"
 # 9. WINDNINJA
 # =============================================================================
 
-WINDNINJA_MODE              = "wxsFile"             # "wxsFile" (local WXS data) | "wxModel" (downloads forecast)
+WINDNINJA_MODE              = "hrrrLocal"           # "hrrrLocal" (HRRR downloaded locally) | "wxsFile" (domain-average from WXS) | "wxModel" (WindNinja downloads pastcast)
 WINDNINJA_SUBDIR            = "windninja"           # subfolder under inputs/
 WINDNINJA_CFG_FILENAME      = "windninja_config.cfg"
 WINDNINJA_CONDA_ENV         = "base"                # conda environment with WindNinja_cli
@@ -176,6 +176,15 @@ WINDNINJA_OUTPUT_HEIGHT_UNITS = "ft"
 WINDNINJA_MAX_WINDOW_DAYS   = 13    # WindNinja hard-fails above 14 days; 13 is safe
 WINDNINJA_MESH_RESOLUTION_FACTOR = 4  # mesh_resolution = cellsize * this factor
 WINDNINJA_NUM_THREADS       = 1     # CPU threads passed to WindNinja_cli (num_threads)
+
+# HRRR local download (WINDNINJA_MODE = "hrrrLocal")
+HRRR_LOCAL_SUBDIR           = "hrrr"    # under inputs/windninja/; deleted with the rest of the workspace
+HRRR_BASE_URL               = "https://storage.googleapis.com/high-resolution-rapid-refresh"
+HRRR_BUFFER_FRACTION        = 0.20      # DEM bbox padding per side before cropping HRRR
+HRRR_MIN_BUFFER_M           = 6000.0    # minimum padding (m); HRRR cells are 3 km
+HRRR_DOWNLOAD_THREADS       = 4         # concurrent hours per case (keep low when running many cases)
+HRRR_DOWNLOAD_RETRIES       = 4
+HRRR_DOWNLOAD_TIMEOUT_S     = 120
 
 # =============================================================================
 # 10. ELMFIRE SIMULATION
