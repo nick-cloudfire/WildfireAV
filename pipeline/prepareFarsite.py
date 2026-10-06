@@ -35,6 +35,7 @@ from rasterio.warp import reproject, Resampling as RioResampling
 import pipelineConfig as cfg
 from common import atomic_write, for_each_case, require, skipped, snap_to_valid_fuel
 from parallel_api import hours
+from liveFuelMoisture import live_moisture
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,8 +54,6 @@ WD_TIF_NAME      = cfg.WD_TIF_NAME
 
 USE_BARRIER = True   # set False to omit barrier.shp from farsite.input
 
-LH_CONST    = f"{cfg.LIVE_HERB_MC:g}"    # same live moisture as ELMFIRE
-LW_CONST    = f"{cfg.LIVE_WOODY_MC:g}"
 DECIMALS    = 0
 
 # ---------------------------------------------------------------------------
@@ -363,9 +362,10 @@ def _process(case_dir: Path):
     m100_mn, _     = _means_by_class(fbfm_int, m100, valid, max_class)
 
     present   = np.where(counts > 0)[0]
+    herb_mc, woody_mc = live_moisture(case_dir)   # same values as ELMFIRE
     fms_lines = [
         f"{fuel} {m1_mn[fuel]:.{DECIMALS}f} {m10_mn[fuel]:.{DECIMALS}f} "
-        f"{m100_mn[fuel]:.{DECIMALS}f} {LH_CONST} {LW_CONST}"
+        f"{m100_mn[fuel]:.{DECIMALS}f} {herb_mc:.0f} {woody_mc:.0f}"
         for fuel in present
     ]
     # prepend fuel-0 default (copy of first real class with code 0)

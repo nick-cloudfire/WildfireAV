@@ -76,6 +76,12 @@ _STEPS: list[tuple[str, list[str], list[str], list[str]]] = [
         [],
     ),
     (
+        "live_moisture",
+        [f"{INPUTS}/live_fuel_moisture.json"],
+        [],
+        [],
+    ),
+    (
         "windninja",
         [f"{INPUTS}/{cfg.WINDNINJA_SUBDIR}"],  # directory
         [],

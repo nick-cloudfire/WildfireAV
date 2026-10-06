@@ -38,11 +38,12 @@ def _dem_centre(dem_path: Path) -> tuple[float, float, float]:
     return float(lat), float(lon), elev
 
 
-def _fetch_hourly(lat: float, lon: float, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+def _fetch_hourly(lat: float, lon: float, start: pd.Timestamp, end: pd.Timestamp,
+                  variables: list[str] = VARIABLES) -> pd.DataFrame:
     params = {
         "latitude": lat, "longitude": lon,
         "start_date": start.date().isoformat(), "end_date": end.date().isoformat(),
-        "hourly": ",".join(VARIABLES), "timezone": "UTC", "model": cfg.OPENMETEO_MODEL,
+        "hourly": ",".join(variables), "timezone": "UTC", "model": cfg.OPENMETEO_MODEL,
     }
     s = get_thread_session()
 

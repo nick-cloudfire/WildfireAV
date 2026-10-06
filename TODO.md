@@ -30,11 +30,11 @@ Effort: S = hours, M = a day or two.
 
 ## Physics
 
-- [ ] **Live fuel moisture from NFDRS4 GSI (M).** Replace fixed `LIVE_HERB_MC=60` / `LIVE_WOODY_MC=90` with
+- [x] **Live fuel moisture from NFDRS4 GSI (M).** Replace fixed `LIVE_HERB_MC=60` / `LIVE_WOODY_MC=90` with
       a per-case value from the Growing Season Index (Jolly et al. 2005; NFDRS4 `LiveFuelMoisture`), marched
       over ERA5 from 1 Dec of the prior year to ignition. Pure-Python port (no native NFDRS4 binding).
       Prototype on 9 cases: herb 30–245 %, woody 60–197 % (most western summer fires fully cured: 30/60).
-      Decide: annual vs perennial herb, woody minimum (60 constructor vs 50 NFDRS init sample).
+      Done with NFDRS4 defaults (annual herb, woody min 60); both configurable (GSI_* in config).
 
 ## HPC / laptop portability
 

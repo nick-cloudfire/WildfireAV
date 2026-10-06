@@ -104,7 +104,9 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
             else f"{len(folders)} case(s)")
 
         need_lfps = [f for f in folders if not (f / "LANDFIRE.tif").exists()]
-        need_wx = [f for f in folders if fresh or not (f / inputs / cfg.WXS_FILE_NAME).exists()]
+        gsi = cfg.LIVE_FUEL_MOISTURE_SOURCE == "gsi"
+        need_wx = [f for f in folders if fresh or not (f / inputs / cfg.WXS_FILE_NAME).exists()
+                   or (gsi and not (f / inputs / "live_fuel_moisture.json").exists())]
         need_wn = [f for f in folders if fresh or not (f / inputs / cfg.WS_TIF_NAME).exists()] if install else []
 
     # ---- credentials ----------------------------------------------------------

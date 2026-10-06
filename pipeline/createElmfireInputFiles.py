@@ -21,6 +21,7 @@ from pyproj import Transformer
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
 from common import atomic_write, case_window, for_each_case, require, skipped, snap_to_valid_fuel
+from liveFuelMoisture import live_moisture
 
 INPUTS = cfg.INPUTS_SUBDIR_NAME
 _B = cfg.LANDFIRE_BAND_FILE_NAMES
@@ -52,7 +53,8 @@ def _ignition_xy(dem_crs, gpkg: Path) -> tuple[float, float]:
 
 
 def build_namelist(tstop_sec: float, x_ign: float, y_ign: float, current_year: int,
-                   hour_of_year: int, num_meteorology_times: int) -> str:
+                   hour_of_year: int, num_meteorology_times: int,
+                   herb_mc: float, woody_mc: float) -> str:
     kv = lambda k, v: f"{k:<30} = {v}"
     return "\n".join([
         "&INPUTS",
@@ -61,8 +63,8 @@ def build_namelist(tstop_sec: float, x_ign: float, y_ign: float, current_year: i
         kv("DT_METEOROLOGY", f"{cfg.ELMFIRE_DT_METEOROLOGY:.1f}"),
         kv("WEATHER_DIRECTORY", f"'./{INPUTS}'"),
         *(kv(k, f"'{v}'") for k, v in MET_FILENAMES.items()),
-        kv("LH_MOISTURE_CONTENT", f"{cfg.LIVE_HERB_MC:.1f}"),
-        kv("LW_MOISTURE_CONTENT", f"{cfg.LIVE_WOODY_MC:.1f}"),
+        kv("LH_MOISTURE_CONTENT", f"{herb_mc:.1f}"),
+        kv("LW_MOISTURE_CONTENT", f"{woody_mc:.1f}"),
         "USE_BARRIERS = .TRUE.",
         "WS_AT_10M = .FALSE.",
         kv("BARRIER_FILENAME", f"'{_stem(cfg.BARRIER_FILE_NAME)}'"),
@@ -122,7 +124,8 @@ def _process(case_dir: Path):
           + (f" — snapped {((x - x0) ** 2 + (y - y0) ** 2) ** 0.5:.0f} m to burnable fuel" if moved else ""))
 
     hour_of_year = int((start - pd.Timestamp(year=start.year, month=1, day=1)).total_seconds() // 3600)
-    text = build_namelist((end - start).total_seconds(), x, y, start.year, hour_of_year, n_met)
+    text = build_namelist((end - start).total_seconds(), x, y, start.year, hour_of_year, n_met,
+                          *live_moisture(case_dir))
 
     for sub in (cfg.ELMFIRE_SCRATCH_SUBDIR, cfg.ELMFIRE_OUTPUTS_SUBDIR):
         (case_dir / sub).mkdir(exist_ok=True)

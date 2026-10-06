@@ -21,6 +21,7 @@ Sections
 11. Barrier file                  – road/water widths and rasterisation options
 12. LFPS API                      – USGS LANDFIRE download service settings
 13. Nelson dead-fuel model        – executable path
+14. Live fuel moisture            – NFDRS4 Growing Season Index model
 
 Machine-specific settings
 -------------------------
@@ -232,8 +233,6 @@ ELMFIRE_DT_METEOROLOGY  = 3600.0    # seconds between wx timesteps
 ELMFIRE_DTDUMP          = 7200.0    # seconds between output dumps
 ELMFIRE_SIMULATION_DT   = 30.0     # simulation time step (seconds)
 ELMFIRE_TARGET_CFL      = 0.2
-LIVE_HERB_MC            = 60.0     # live herbaceous moisture content (%) — used by ELMFIRE and FARSITE
-LIVE_WOODY_MC           = 90.0     # live woody moisture content (%)       — used by ELMFIRE and FARSITE
 ELMFIRE_OUTPUTS_SUBDIR  = "outputs"
 ELMFIRE_SCRATCH_SUBDIR  = "scratch"
 
@@ -293,6 +292,26 @@ LFPS_CONCURRENT_JOBS        = 60    # concurrent LFPS jobs in prefetchLandfire.p
 # =============================================================================
 
 # NELSON_EXE: see section 2.
+
+# =============================================================================
+# 14. LIVE FUEL MOISTURE  (one herbaceous + one woody value per case, used by ELMFIRE and FARSITE)
+# =============================================================================
+
+LIVE_FUEL_MOISTURE_SOURCE   = "gsi"     # "gsi" (NFDRS4 Growing Season Index from ERA5) | "constant"
+LIVE_HERB_MC                = 60.0      # % — used when LIVE_FUEL_MOISTURE_SOURCE = "constant"
+LIVE_WOODY_MC               = 90.0      # %
+
+# GSI model (Jolly et al. 2005; defaults = firelab/NFDRS4 LiveFuelMoisture)
+GSI_HERB_ANNUAL             = True          # annual herbs cure for the year once below 120 % after peaking
+GSI_HERB_MC_RANGE           = (30.0, 250.0) # % at greenup threshold .. at GSI_MAX
+GSI_WOODY_MC_RANGE          = (60.0, 200.0) # % (NFDRS4's sample init file uses a 50 % minimum)
+GSI_GREENUP                 = 0.5           # fraction of GSI_MAX where greenup starts
+GSI_MAX                     = 1.0
+GSI_AVERAGING_DAYS          = 21            # running mean of the daily GSI
+GSI_TMIN_C                  = (-2.0, 5.0)   # minimum temperature ramp 0 -> 1
+GSI_VPD_PA                  = (900.0, 4100.0)       # VPD ramp 1 -> 0
+GSI_DAYLENGTH_S             = (36000.0, 39600.0)    # daylength ramp 0 -> 1
+GSI_OBS_HOUR                = 13            # daily values = 24 h ending at this local hour (NFDRS)
 
 # =============================================================================
 # OVERRIDES  (pipelineConfig_local.py, then WAV_<NAME> env vars) — see top

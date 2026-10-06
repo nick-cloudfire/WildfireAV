@@ -75,6 +75,7 @@ def plan(wind_source: str | None = None) -> list[tuple[str, str]]:
         ("split_bands",     "splitLandfireTifBands"),
         ("adj_phi",         "makePhiAndAdjFiles"),
         ("weather",         "downloadWeatherData"),
+        ("live_moisture",   "liveFuelMoisture"),
     ]
     if wind_source == "install":
         steps.append(("windninja", "runWindninja"))

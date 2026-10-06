@@ -38,6 +38,7 @@ Data/
 │   ├── splitLandfireTifBands.py       ← step 2:  split multi-band LANDFIRE.tif
 │   ├── makePhiAndAdjFiles.py          ← step 3:  create adj/phi rasters
 │   ├── downloadWeatherData.py         ← step 4:  fetch ERA5 weather (OpenMeteo)
+│   ├── liveFuelMoisture.py            ← step 4b: live fuel moisture from the NFDRS4 GSI
 │   ├── runWindninja.py                ← step 5:  WindNinja (WINDNINJA_MODE = hrrrLocal | wxModel | wxsFile)
 │   ├── downloadHrrr.py                ← helper: byte-range HRRR download → WindNinja pastcast zip
 │   ├── wn_to_geotiff.py               ← helper: convert WindNinja ASCII → GeoTIFF
@@ -382,6 +383,7 @@ Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
 Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
 Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
 Step 4   downloadWeatherData            →  inputs/weather.wxs
+Step 4b  liveFuelMoisture               →  inputs/live_fuel_moisture.json  (GSI live herb/woody %)
 Step 5   runWindninja                   →  inputs/{ws,wd}.tif  (WindNinja)
 Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
 Step 7   getBarrierFile                 →  inputs/barrier.tif
@@ -398,6 +400,7 @@ Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
 Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
 Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
 Step 4   downloadWeatherData            →  inputs/weather.wxs
+Step 4b  liveFuelMoisture               →  inputs/live_fuel_moisture.json  (GSI live herb/woody %)
 Step 5   (WindNinja skipped)
 Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
 Step 7   getBarrierFile                 →  inputs/barrier.tif
@@ -409,6 +412,21 @@ Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE w
                                             deletes farsite_WindGrids.tif after extraction
 Step 12  runElmfireCase                 →  outputs/time_of_arrival_*.tif
 ```
+
+#### Live fuel moisture
+
+Each case gets one live herbaceous and one live woody moisture, used by both
+ELMFIRE (`LH_/LW_MOISTURE_CONTENT`) and FARSITE (the live columns of every
+fuel-moisture line).  With `LIVE_FUEL_MOISTURE_SOURCE = "gsi"` (default) they
+come from the Growing Season Index (Jolly, Nemani & Running 2005, *Global
+Change Biology* 11:619–632) as implemented in NFDRS4's `LiveFuelMoisture`:
+the product of minimum-temperature, VPD and daylength ramps, averaged over 21
+days and mapped onto 30–250 % (herb) / 60–200 % (woody) above a greenup
+threshold of 0.5, with the annual-herb curing rule.  It is marched over ERA5 at
+the DEM centre from 1 December of the previous year to the simulation start.
+The Python port matches the NFDRS4 C++ to within 1e-4 % on two years of ERA5.
+Parameters are in `pipelineConfig.py` section 14; set the source to
+`"constant"` to use `LIVE_HERB_MC` / `LIVE_WOODY_MC` instead.
 
 ### Running on an HPC
 
