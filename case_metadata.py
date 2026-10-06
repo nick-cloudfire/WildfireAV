@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import pandas as pd
 import pipelineConfig as cfg
 
@@ -32,24 +33,14 @@ def _normalise_scalar(value):
             return None
     except Exception:
         pass
-    if isinstance(value, pd.Timestamp):
-        if value.tzinfo is not None:
-            value = value.tz_convert("UTC").tz_localize(None)
-        return value.isoformat()
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone().replace(tzinfo=None)
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if hasattr(value, "item"):
+    if hasattr(value, "item") and not isinstance(value, datetime):   # numpy scalars
         try:
             value = value.item()
         except Exception:
             pass
-    if isinstance(value, datetime):
+    if isinstance(value, datetime):          # includes pd.Timestamp; stored as naive UTC
         if value.tzinfo is not None:
-            value = value.astimezone().replace(tzinfo=None)
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
         return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
@@ -61,7 +52,9 @@ def write_case_metadata(case_dir: Path, data: Dict[str, Any]) -> Path:
     case_dir.mkdir(parents=True, exist_ok=True)
     out = metadata_path(case_dir)
     payload = {k: _normalise_scalar(v) for k, v in data.items()}
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp = out.with_name(f".{out.name}.partial")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, out)   # never leave a half-written file for a resumed run
     return out
 
 
@@ -79,7 +72,7 @@ def read_case_metadata(case_dir: Path) -> Dict[str, Any]:
 
 
 def case_dirs(root: Optional[Path] = None) -> list[Path]:
-    root = Path(root or cfg.FIRE_ROOT_LOGIN_NODE)
+    root = Path(root or cfg.FIRE_ROOT)
     if not root.exists():
         return []
     return sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit())
@@ -102,7 +95,7 @@ def write_metadata_from_summary(
     max_workers: int = cfg.SETUP_PIPELINE_MAX_WORKERS,
 ) -> int:
     summary_csv = Path(summary_csv)
-    case_root = Path(case_root or cfg.FIRE_ROOT_LOGIN_NODE)
+    case_root = Path(case_root or cfg.FIRE_ROOT)
     if not summary_csv.exists():
         raise FileNotFoundError(f"Summary CSV not found: {summary_csv}")
     df = pd.read_csv(summary_csv)

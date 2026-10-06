@@ -12,12 +12,13 @@ retry_call         – exponential-backoff retry wrapper
 
 from __future__ import annotations
 
-import io
+import os
+import signal
 import subprocess
 import sys
 import threading
 import time
-from typing import Callable, Optional, TypeVar
+from typing import IO, Callable, Optional, TypeVar
 
 import requests
 
@@ -59,54 +60,80 @@ class Tee:
 # run_subprocess – route subprocess output through Python's sys.stdout
 # ---------------------------------------------------------------------------
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the child and everything it started (wine, conda run → WindNinja, …)."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def run_subprocess(
     cmd: list,
     check: bool = True,
+    timeout: float | None = None,
+    log: Optional[IO[str]] = None,
     **kwargs,
 ) -> subprocess.CompletedProcess:
     """
-    Run a subprocess and route its stdout/stderr through Python's sys.stdout.
+    Run a subprocess, streaming its stdout/stderr line by line to ``log`` (an
+    open text file) or, by default, through Python's sys.stdout — so output
+    lands in pipeline.log whether sys.stdout is a real file or a virtual
+    stream (Tee, the per-case stamper …).
 
-    Works whether sys.stdout is a real file (e.g. pipeline.log via
-    redirect_stdout) or a virtual stream (e.g. Tee).  Output is streamed
-    line-by-line so progress appears in real time.
-
-    Use this instead of subprocess.run() for any process whose output should
-    land in pipeline.log rather than leaking to the terminal.
-    WindNinja is exempt — it writes to its own chunk log intentionally.
-
-    If the caller is interrupted (e.g. SIGTERM at a SLURM time limit) the child
-    is killed rather than left running.
+    The child runs in its own process group.  If ``timeout`` (seconds) expires
+    the whole group is killed and ``subprocess.TimeoutExpired`` is raised, so a
+    hung program fails its step instead of holding a worker until the job's
+    wall time.  If the caller is interrupted (e.g. SIGTERM at a SLURM time
+    limit) the group is killed too.
     """
-    try:
-        sys.stdout.fileno()
-        # sys.stdout is a real file descriptor — hand it to the OS directly
-        return subprocess.run(
-            cmd,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            check=check,
-            **kwargs,
-        )
-    except (AttributeError, io.UnsupportedOperation):
-        # sys.stdout is a virtual stream (Tee, StringIO …) — stream line by line
-        with subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            **kwargs,
-        ) as proc:
-            assert proc.stdout is not None
-            try:
-                for line in proc.stdout:
+    expired = threading.Event()
+
+    def _expire(proc):
+        expired.set()
+        _kill_tree(proc)
+
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=(os.name == "posix"),
+        **kwargs,
+    ) as proc:
+        assert proc.stdout is not None
+        timer = threading.Timer(timeout, _expire, [proc]) if timeout else None
+        if timer:
+            timer.daemon = True
+            timer.start()
+        try:
+            for line in proc.stdout:
+                if log is None:
                     print(line, end="", flush=True)
-            except BaseException:
-                proc.kill()
-                raise
-        if check and proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, cmd)
-        return subprocess.CompletedProcess(cmd, proc.returncode)
+                else:
+                    log.write(line)
+                    log.flush()
+            proc.wait()
+        except BaseException:
+            _kill_tree(proc)
+            raise
+        finally:
+            if timer:
+                timer.cancel()
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    return subprocess.CompletedProcess(cmd, proc.returncode)
+
+
+def hours(h: float) -> float | None:
+    """Config timeouts are in hours; 0 / None means no limit."""
+    return h * 3600 if h else None
 
 
 # ---------------------------------------------------------------------------

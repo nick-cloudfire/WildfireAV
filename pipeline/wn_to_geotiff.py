@@ -9,7 +9,8 @@ import rasterio
 from rasterio.transform import Affine
 
 from common import atomic_write
-from parallel_api import run_subprocess
+import pipelineConfig as cfg
+from parallel_api import hours, run_subprocess
 
 DT_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})_(\d{4})")  # MM-DD-YYYY_HHMM
 
@@ -80,14 +81,14 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
             "-resolution", "highest",
             "-te", str(xmin), str(ymin), str(xmax), str(ymax),
             str(vrt),
-        ] + [str(p) for p in files])
+        ] + [str(p) for p in files], timeout=hours(cfg.GDAL_TIMEOUT_H))
         run_subprocess([
             "gdal_translate", "-q", str(vrt), str(out_tif),
             "-of", "GTiff",
             "-co", "COMPRESS=lzw",
             "-co", "TILED=YES",
             "-co", "BIGTIFF=IF_SAFER",
-        ])
+        ], timeout=hours(cfg.GDAL_TIMEOUT_H))
     finally:
         vrt.unlink(missing_ok=True)
     print(f"  {out_tif.name.lstrip('.').replace('.partial', '')}: {len(files)} hourly bands")

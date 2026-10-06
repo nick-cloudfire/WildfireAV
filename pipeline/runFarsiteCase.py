@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pipelineConfig as cfg
 from common import fmt_duration, for_each_case, skipped
-from parallel_api import run_subprocess
+from parallel_api import hours, run_subprocess
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -70,6 +70,7 @@ def run_farsite(case_dir: Path):
         ["wine64", str(FARSITE_EXE), "farsite.txt"],
         cwd=str(farsite_dir),
         env=wine_env,
+        timeout=hours(cfg.FARSITE_TIMEOUT_H),
     )
 
     if sentinel.exists():

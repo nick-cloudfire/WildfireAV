@@ -27,7 +27,6 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import textwrap
 import time
 from pathlib import Path
@@ -39,6 +38,7 @@ import pipelineConfig as cfg
 import wn_to_geotiff
 from case_metadata import read_case_metadata
 from common import case_window, fmt_duration, for_each_case, progress, require, skipped
+from parallel_api import hours, run_subprocess
 
 INPUTS        = cfg.INPUTS_SUBDIR_NAME
 MODE          = cfg.WINDNINJA_MODE
@@ -193,7 +193,8 @@ def _run_cli(run_dir: Path, cfg_text: str, label: str, main_dir: Path) -> None:
     with open(log_path, "w", encoding="utf-8") as logf:
         logf.write("COMMAND:\n" + " ".join(cmd) + "\n\n")
         logf.flush()
-        rc = subprocess.run(cmd, cwd=run_dir, stdout=logf, stderr=subprocess.STDOUT).returncode
+        rc = run_subprocess(cmd, check=False, log=logf, cwd=run_dir,
+                            timeout=hours(cfg.WINDNINJA_TIMEOUT_H)).returncode
     if rc != 0:
         tail = log_path.read_text(errors="ignore").strip().splitlines()[-15:]
         print("    --- tail of " + str(log_path) + " ---\n    " + "\n    ".join(tail))

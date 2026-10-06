@@ -14,7 +14,7 @@ Steps
 4.  eraseInvalidCases            – remove cases shorter than MIN_HOURS_DURATION
 5.  write_metadata_from_summary  – write case_metadata.json to each folder
 
-Outputs (written to FIRE_ROOT_LOGIN_NODE)
+Outputs (written to FIRE_ROOT)
 -----------------------------------------
 - perimeters_ignitions.gpkg
 - all_ignitions.gpkg
@@ -84,6 +84,19 @@ def main() -> None:
     print(f"Wrote case metadata for {count} cases.")
 
 
+def run(clean: bool = False) -> Path:
+    """Optionally clean, then run setup with its output also written to pipeline_setup.log."""
+    if clean:
+        clean_generated()
+    log_file = FIRE_ROOT / "pipeline_setup.log"
+    FIRE_ROOT.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "w", encoding="utf-8", buffering=1) as log:
+        tee = Tee(sys.stdout, log)
+        with redirect_stdout(tee), redirect_stderr(tee):
+            main()
+    return log_file
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the local pipeline setup.")
     parser.add_argument(
@@ -91,14 +104,4 @@ if __name__ == "__main__":
         action="store_true",
         help="Delete all generated case folders and intermediate files before running.",
     )
-    args = parser.parse_args()
-
-    if args.clean:
-        clean_generated()
-
-    LOG_FILE = FIRE_ROOT / "pipeline_setup.log"
-    FIRE_ROOT.mkdir(parents=True, exist_ok=True)
-    with open(LOG_FILE, "w", encoding="utf-8") as log:
-        tee = Tee(sys.stdout, log)
-        with redirect_stdout(tee), redirect_stderr(tee):
-            main()
+    run(clean=parser.parse_args().clean)

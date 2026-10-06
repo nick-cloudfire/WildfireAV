@@ -44,6 +44,7 @@ import pandas as pd
 
 import pipelineConfig as cfg
 from case_metadata import case_dirs
+from common import fmt_duration
 from getLandfireProductsForFireSim import process_folder
 
 
@@ -166,15 +167,7 @@ _LINE_W    = _W_CASE + _W_STATUS + _W_DETAIL + _W_ELAPSED + 8
 
 
 def _fmt_elapsed(seconds: float) -> str:
-    if seconds <= 0:
-        return "—"
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m:02d}m"
-    if m:
-        return f"{m}m {s:02d}s"
-    return f"{s}s"
+    return fmt_duration(seconds) if seconds > 0 else "—"
 
 
 def _render(total: int, interval: float) -> str:

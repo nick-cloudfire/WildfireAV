@@ -33,7 +33,8 @@ from rasterio.transform import Affine
 from rasterio.warp import reproject, Resampling as RioResampling
 
 import pipelineConfig as cfg
-from common import for_each_case, require, skipped, snap_to_valid_fuel
+from common import atomic_write, for_each_case, require, skipped, snap_to_valid_fuel
+from parallel_api import hours
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -52,8 +53,8 @@ WD_TIF_NAME      = cfg.WD_TIF_NAME
 
 USE_BARRIER = True   # set False to omit barrier.shp from farsite.input
 
-LH_CONST    = 60
-LW_CONST    = 90
+LH_CONST    = f"{cfg.LIVE_HERB_MC:g}"    # same live moisture as ELMFIRE
+LW_CONST    = f"{cfg.LIVE_WOODY_MC:g}"
 DECIMALS    = 0
 
 # ---------------------------------------------------------------------------
@@ -62,7 +63,7 @@ DECIMALS    = 0
 
 def _run(cmd: list[str]) -> str:
     """Run a GDAL/OGR command; on failure raise with its stderr (not swallowed)."""
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=hours(cfg.GDAL_TIMEOUT_H))
     if r.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed (exit {r.returncode}): {r.stderr.strip()[-500:]}")
     return r.stdout
@@ -440,7 +441,8 @@ def _process(case_dir: Path):
         "FARSITE_ATM_FILE: winds.atm",
         "",
     ]
-    farsite_input.write_text("\n".join(content) + "\n")
+    with atomic_write(farsite_input) as tmp:   # farsite.input is the step's done-marker
+        tmp.write_text("\n".join(content) + "\n")
     print(f"  farsite.input  ({start_dt:%Y-%m-%d %H:%M} -> {end_dt:%Y-%m-%d %H:%M})")
 
 

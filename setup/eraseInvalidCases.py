@@ -12,7 +12,7 @@ in-place to remove those rows.
 Input / output
 --------------
 - Reads and overwrites: FIRE_SUMMARY_SAT_CSV_PATH
-- Deletes: FIRE_ROOT_LOGIN_NODE/<folder_name>/ for invalid cases
+- Deletes: FIRE_ROOT/<folder_name>/ for invalid cases
 """
 
 from pathlib import Path

@@ -36,6 +36,7 @@ from rasterio.windows import Window, from_bounds
 
 import pipelineConfig as cfg
 from common import fmt_duration, progress
+from parallel_api import retry_call
 
 HRRR_BASE_URL   = cfg.HRRR_BASE_URL
 TARGET_BANDS    = getattr(cfg, "HRRR_TARGET_BANDS", [
@@ -84,18 +85,13 @@ def parse_idx_ranges(idx_text: str, targets=TARGET_BANDS) -> list[tuple[int, int
 
 
 def _get(session: requests.Session, url: str, headers=None) -> requests.Response:
-    """GET with exponential backoff on network errors, 429 and 5xx."""
-    last: Exception | None = None
-    for attempt in range(RETRIES):
-        try:
-            r = session.get(url, headers=headers, timeout=TIMEOUT_S)
-            if r.status_code in (200, 206, 404):
-                return r
-            last = RuntimeError(f"HTTP {r.status_code}")
-        except requests.RequestException as e:
-            last = e
-        time.sleep(2 ** attempt)
-    raise RuntimeError(f"failed to fetch {url} after {RETRIES} attempts: {last}")
+    """GET with exponential backoff on network errors, 429 and 5xx (404 is returned)."""
+    def once() -> requests.Response:
+        r = session.get(url, headers=headers, timeout=TIMEOUT_S)
+        if r.status_code not in (200, 206, 404):
+            raise requests.HTTPError(f"HTTP {r.status_code} for {url}", response=r)
+        return r
+    return retry_call(once, tries=RETRIES, base_sleep_s=1, max_sleep_s=30)
 
 
 # ---------------------------------------------------------------------------

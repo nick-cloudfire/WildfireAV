@@ -33,6 +33,7 @@ Performance notes
 
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -51,8 +52,8 @@ import pipelineConfig
 # ---------------------------------------------------------------------------
 
 FIRE_ROOT           = Path(pipelineConfig.FIRE_ROOT)
-MASTER_CSV          = pipelineConfig.FIRE_SUMMARY_CSV_PATH      # full path under FIRE_ROOT_LOGIN_NODE
-OUTPUT_CSV          = pipelineConfig.FIRE_SUMMARY_SAT_CSV_PATH  # full path under FIRE_ROOT_LOGIN_NODE
+MASTER_CSV          = pipelineConfig.FIRE_SUMMARY_CSV_PATH      # full path under FIRE_ROOT
+OUTPUT_CSV          = pipelineConfig.FIRE_SUMMARY_SAT_CSV_PATH  # full path under FIRE_ROOT
 
 FOLDER_COL          = pipelineConfig.COL_FOLDER
 IGNITION_COL        = pipelineConfig.COL_IGNITION_TIME
@@ -218,10 +219,10 @@ def _safe_to_gpkg(gdf: gpd.GeoDataFrame, out_path: Path, layer: str) -> None:
             if any(isinstance(v, (list, dict, tuple, set)) for v in sample):
                 g = g.drop(columns=[c])
 
-    if out_path.exists():
-        out_path.unlink()
-
-    g.to_file(out_path, layer=layer, driver="GPKG", engine="pyogrio", index=False)
+    tmp = out_path.with_name(f".{out_path.stem}.partial.gpkg")   # never leave a half-written gpkg
+    tmp.unlink(missing_ok=True)
+    g.to_file(tmp, layer=layer, driver="GPKG", engine="pyogrio", index=False)
+    os.replace(tmp, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +426,9 @@ def main() -> None:
     )
     print(f"Saving updated master to {OUTPUT_CSV} …")
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    master.to_csv(OUTPUT_CSV, index=False)
+    tmp = OUTPUT_CSV.with_name(f".{OUTPUT_CSV.name}.partial")
+    master.to_csv(tmp, index=False)
+    os.replace(tmp, OUTPUT_CSV)
 
 
 if __name__ == "__main__":

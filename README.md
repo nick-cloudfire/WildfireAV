@@ -60,9 +60,7 @@ Data/
 │   ├── prefetchLandfire.py            ← pre-fetch LANDFIRE for all cases
 │   ├── debugBandCounts.py             ← debug raster band counts per case
 │   ├── debugSatelliteEndTimes.py      ← inspect satellite coverage curves
-│   ├── compareOutputs.py              ← multi-model PDF comparison (fast)
-│   ├── visualiseSingleCase.py         ← plot observed vs simulated for one case
-│   └── getWeatherHerbie.py            ← fetch weather via Herbie (dev use)
+│   └── visualiseSingleCase.py         ← plot observed vs simulated for one case
 
 # Data directories
 # Input data (not version-controlled — see Input data requirements below)

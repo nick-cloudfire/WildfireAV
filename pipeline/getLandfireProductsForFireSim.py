@@ -27,7 +27,7 @@ import geopandas as gpd
 import pandas as pd
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from common import SKIPPED, for_each_case, progress, require
+from common import SKIPPED, atomic_write, for_each_case, progress, require
 from parallel_api import get_thread_session
 from pyproj import CRS
 
@@ -43,7 +43,7 @@ BASE_API        = cfg.LFPS_BASE_API
 TERRAIN_PRODUCTS = list(cfg.LFPS_TERRAIN_PRODUCTS)   # always downloaded
 POLL_SLEEP_S        = cfg.LFPS_POLL_SLEEP_S
 POLL_HEARTBEAT_S    = cfg.LFPS_POLL_HEARTBEAT_S
-MAX_RETRIES     = 3     # total attempts per case before giving up
+MAX_RETRIES     = cfg.LFPS_MAX_ATTEMPTS
 
 # ---------------------------------------------------------------------------
 # LANDFIRE dataset version tables
@@ -122,25 +122,31 @@ def _submit_job(products: list[str], bbox: tuple, projection: int) -> str:
 
 
 def _poll_job(job_id: str, log=print) -> dict:
+    """Poll until the job finishes.  Network blips and 5xx keep polling the same
+    job (resubmitting would lose its queue position); only LFPS_JOB_TIMEOUT_H,
+    if set, gives up."""
     import requests as _requests
     t0 = time.monotonic()
+    deadline = t0 + cfg.LFPS_JOB_TIMEOUT_H * 3600 if cfg.LFPS_JOB_TIMEOUT_H else None
     last_status = None
     last_queue_pos = None
     last_heartbeat = t0
     while True:
+        if deadline and time.monotonic() > deadline:
+            raise TimeoutError(f"LFPS job {job_id} not finished after {cfg.LFPS_JOB_TIMEOUT_H} h")
         try:
             r = get_thread_session().get(
                 f"{BASE_API}/api/job/status", params={"JobId": job_id}, timeout=30
             )
             r.raise_for_status()
-        except _requests.HTTPError as exc:
-            # Transient server-side errors (502, 503, 504) — keep polling
-            if exc.response is not None and exc.response.status_code in (502, 503, 504):
-                elapsed = int(time.monotonic() - t0)
-                log(f"  [{elapsed:4d}s] transient {exc.response.status_code}, retrying poll…")
-                time.sleep(POLL_SLEEP_S)
-                continue
-            raise
+        except (_requests.ConnectionError, _requests.Timeout, _requests.HTTPError) as exc:
+            code = getattr(exc.response, "status_code", None)
+            if isinstance(exc, _requests.HTTPError) and code not in (500, 502, 503, 504):
+                raise
+            elapsed = int(time.monotonic() - t0)
+            log(f"  [{elapsed:4d}s] transient {code or type(exc).__name__}, retrying poll…")
+            time.sleep(POLL_SLEEP_S)
+            continue
         js = r.json()
         status = js.get("status")
         queue_pos = js.get("queuePosition")
@@ -166,12 +172,11 @@ def _poll_job(job_id: str, log=print) -> dict:
 
 def _download_zip(url: str, out_path: Path) -> None:
     s = get_thread_session()
-    with s.get(url, stream=True, timeout=300) as r:
+    with s.get(url, stream=True, timeout=300) as r, atomic_write(out_path) as tmp:
         r.raise_for_status()
-        with open(out_path, "wb") as f:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +256,7 @@ def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
     epsg = _best_utm_crs(expanded).to_epsg()
     log(f"  Output CRS: EPSG:{epsg}")
 
-    zip_path = folder / "LANDFIRE.zip"
+    zip_path = folder / cfg.LANDFIRE_ZIP_NAME
     last_exc: BaseException | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):

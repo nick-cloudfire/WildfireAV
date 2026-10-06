@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import signal
 import statistics
 import subprocess
@@ -121,6 +122,11 @@ class Batch:
         # interrupt it while it already holds the lock (e.g. mid-heartbeat).
         self._lock = threading.RLock()
         self._t0 = time.monotonic()
+        # Share the CPUs between cases so GDAL/OpenMP/BLAS don't each grab every core.
+        threads = str(max(1, cfg.AVAILABLE_CPUS // self.workers))
+        self._case_env = {**os.environ}
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "GDAL_NUM_THREADS"):
+            self._case_env.setdefault(var, threads)
 
     # -- events --------------------------------------------------------------
 
@@ -158,7 +164,7 @@ class Batch:
         t0 = time.monotonic()
         proc = subprocess.Popen(
             [sys.executable, "-u", str(DRIVER), str(folder), "--quiet"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=self._case_env,
         )
         with self._lock:
             self._procs.add(proc)

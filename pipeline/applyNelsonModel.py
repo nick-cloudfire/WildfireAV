@@ -8,11 +8,12 @@ Step "nelson": dead-fuel moisture (m1/m10/m100) with the Nelson C# model.
 4. Remove the intermediate BSQ/HDR/XML files.
 """
 
+import os
 from pathlib import Path
 
 import pipelineConfig as cfg
 from common import atomic_write, for_each_case, require, skipped
-from parallel_api import run_subprocess
+from parallel_api import hours, run_subprocess
 
 NELSON_EXE = Path(cfg.NELSON_EXE)
 _B = cfg.LANDFIRE_BAND_FILE_NAMES
@@ -20,7 +21,8 @@ INPUT_STEMS = [_B[4], _B[0], _B[1], _B[2]]   # cc, dem, slp, asp
 
 
 def _translate(src: Path, dst: Path, *opts: str) -> None:
-    run_subprocess(["gdal_translate", "-q", "--config", "GDAL_CACHEMAX", "512", *opts, str(src), str(dst)])
+    run_subprocess(["gdal_translate", "-q", "--config", "GDAL_CACHEMAX", "512", *opts, str(src), str(dst)],
+                   timeout=hours(cfg.GDAL_TIMEOUT_H))
 
 
 def _clean(folder: Path) -> None:
@@ -47,14 +49,15 @@ def _process(case_dir: Path):
         cc, dem, slp, asp = (inputs / f"{s}.bsq" for s in INPUT_STEMS)
         print(f"  Running Nelson ({cfg.CONDITIONING_DAYS} conditioning days)")
         run_subprocess([str(NELSON_EXE), str(wxs), str(dem), str(slp), str(asp), str(cc),
-                        str(cfg.CONDITIONING_DAYS)], cwd=str(NELSON_EXE.parent))
+                        str(cfg.CONDITIONING_DAYS)], cwd=str(NELSON_EXE.parent),
+                       timeout=hours(cfg.NELSON_TIMEOUT_H))
 
         for out in outs:
             bsq = out.with_suffix(".bsq")
             require(bsq, hint="Nelson exited 0 but did not write this output")
             with atomic_write(out) as tmp:
                 _translate(bsq, tmp, "-of", "GTiff", "-co", "COMPRESS=ZSTD", "-co", "BIGTIFF=YES",
-                           "-co", "NUM_THREADS=8")
+                           "-co", f"NUM_THREADS={os.environ.get('GDAL_NUM_THREADS', 'ALL_CPUS')}")
     finally:
         _clean(inputs)
     print(f"  Wrote {', '.join(p.name for p in outs)}")

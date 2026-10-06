@@ -4,7 +4,7 @@ Step 2 of setupPipeline: create numbered case folders from matched pairs.
 
 Reads the matched perimeters and ignition points produced by
 processScarsAndPoints.py, then for each perimeter–point pair:
-- Creates a numbered folder (00001, 00002, …) under FIRE_ROOT_LOGIN_NODE.
+- Creates a numbered folder (00001, 00002, …) under FIRE_ROOT.
 - Writes firescar.gpkg and ignition_point.gpkg into the folder.
 - Writes case_metadata.json.
 
@@ -13,8 +13,8 @@ time to the perimeter ignition date is chosen.
 
 Output
 ------
-- FIRE_ROOT_LOGIN_NODE/00001/, 00002/, … (one folder per fire case)
-- FIRE_ROOT_LOGIN_NODE/fire_pairs_summary.csv
+- FIRE_ROOT/00001/, 00002/, … (one folder per fire case)
+- FIRE_ROOT/fire_pairs_summary.csv
 """
 
 from pathlib import Path

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pipelineConfig as cfg
 from common import fmt_duration, for_each_case, skipped
-from parallel_api import run_subprocess
+from parallel_api import hours, run_subprocess
 
 
 def _toa(case_dir: Path) -> list[Path]:
@@ -28,7 +28,7 @@ def run_elmfire(case_dir: Path):
 
     print(f"  Running: {cfg.ELMFIRE_EXE} {data_files[0].name}")
     t0 = time.monotonic()
-    run_subprocess([cfg.ELMFIRE_EXE, data_files[0].name], cwd=case_dir)
+    run_subprocess([cfg.ELMFIRE_EXE, data_files[0].name], cwd=case_dir, timeout=hours(cfg.ELMFIRE_TIMEOUT_H))
     if not _toa(case_dir):
         raise RuntimeError(f"ELMFIRE exited 0 but wrote no time_of_arrival_*.tif in "
                            f"{case_dir / cfg.ELMFIRE_OUTPUTS_SUBDIR}")

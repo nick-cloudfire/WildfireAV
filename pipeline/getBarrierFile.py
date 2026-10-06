@@ -14,7 +14,6 @@ The national datasets are first clipped to the case extent with ogr2ogr
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 import geopandas as gpd
@@ -24,6 +23,7 @@ from rasterio.features import rasterize
 
 import pipelineConfig as cfg
 from common import atomic_write, for_each_case, require, skipped
+from parallel_api import hours, run_subprocess
 
 DEM_NAME = cfg.LANDFIRE_BAND_FILE_NAMES[0] + ".tif"
 
@@ -40,7 +40,7 @@ def _clip(bounds, crs, src: Path, layer: str | None, out: Path, where: str | Non
             "-spat_srs", f"EPSG:{epsg}" if epsg else crs.to_wkt()]
     if where:
         cmd += ["-where", where]
-    subprocess.run(cmd, check=True)
+    run_subprocess(cmd, timeout=hours(cfg.GDAL_TIMEOUT_H))
 
 
 def _read(path: Path, layer: str | None, crs, bounds) -> gpd.GeoDataFrame:

@@ -62,8 +62,8 @@ def _point_inside_polygon(row) -> bool:
 
 def main() -> None:
     input_file         = pipelineConfig.MTBS_PERIMS_RAW
-    output_perims_file = pipelineConfig.MTBS_PERIMS_WITH_IGNITIONS   # full path under FIRE_ROOT_LOGIN_NODE
-    output_points_file = pipelineConfig.USFS_POINTS_MATCHED          # full path under FIRE_ROOT_LOGIN_NODE
+    output_perims_file = pipelineConfig.MTBS_PERIMS_WITH_IGNITIONS   # full path under FIRE_ROOT
+    output_points_file = pipelineConfig.USFS_POINTS_MATCHED          # full path under FIRE_ROOT
     threshold          = pipelineConfig.MTBS_AREA_THRESHOLD_ACRES
     points_file        = pipelineConfig.USFS_POINTS_RAW
     acres_field        = pipelineConfig.MTBS_ACRES_FIELD
