@@ -151,7 +151,10 @@ def snap_to_valid_fuel(
         row0 = min(max(row0, 0), ds.height - 1)
         col0 = min(max(col0, 0), ds.width - 1)
 
-        for r in range(0, max_radius_cells + 1):
+        # Square windows of doubling radius.  A hit at distance d is the nearest
+        # one once the window covers the whole circle of radius d (d <= r).
+        r = 0
+        while True:
             r0, r1 = max(row0 - r, 0), min(row0 + r, ds.height - 1)
             c0, c1 = max(col0 - r, 0), min(col0 + r, ds.width - 1)
             arr = ds.read(1, window=Window(c0, r0, c1 - c0 + 1, r1 - r0 + 1), masked=False)
@@ -160,13 +163,18 @@ def snap_to_valid_fuel(
                 valid &= arr != ds.nodata
             if np.issubdtype(arr.dtype, np.floating):
                 valid &= ~np.isnan(arr)
-            if not valid.any():
-                continue
-            rows, cols = np.nonzero(valid)
-            rows, cols = rows + r0, cols + c0
-            k = int(np.argmin((rows - row0) ** 2 + (cols - col0) ** 2))
-            xc, yc = transform_xy(ds.transform, int(rows[k]), int(cols[k]), offset="center")
-            return float(xc), float(yc), r > 0
+            if valid.any():
+                rows, cols = np.nonzero(valid)
+                rows, cols = rows + r0, cols + c0
+                d2 = (rows - row0) ** 2 + (cols - col0) ** 2
+                k = int(np.argmin(d2))
+                whole = r0 == 0 and c0 == 0 and r1 == ds.height - 1 and c1 == ds.width - 1
+                if d2[k] <= r * r or r >= max_radius_cells or whole:
+                    xc, yc = transform_xy(ds.transform, int(rows[k]), int(cols[k]), offset="center")
+                    return float(xc), float(yc), r > 0
+            if r >= max_radius_cells:
+                break
+            r = min(max(2 * r, 1), max_radius_cells)
 
     raise RuntimeError(
         f"No burnable fuel (FBFM40 >= {valid_min:g}) within {max_radius_cells} cells of the ignition point"

@@ -21,12 +21,9 @@ Per case it writes
 
 Steps
 -----
-The step plan depends on ``WINDNINJA_SOURCE`` (see ``plan()``):
-
-  "install": landfire, split_bands, adj_phi, weather, windninja, nelson,
-             barrier, elmfire_inputs, prepare_farsite, run_elmfire, run_farsite
-  "farsite": as above without windninja, then run_farsite,
-             farsite_wind_to_geotiff, run_elmfire
+See ``plan()``: landfire, split_bands, adj_phi, weather, live_moisture,
+windninja, nelson, barrier, elmfire_inputs, prepare_farsite, run_elmfire,
+run_farsite.
 
 Every step skips itself when its outputs already exist, so re-running a case
 resumes where it stopped.
@@ -65,40 +62,25 @@ LOG_FILE    = "pipeline.log"
 # Step plan
 # ---------------------------------------------------------------------------
 
-def plan(wind_source: str | None = None) -> list[tuple[str, str]]:
-    """Return the ordered [(step_key, module_name), ...] for a wind source."""
-    wind_source = wind_source or cfg.WINDNINJA_SOURCE
-    if wind_source not in ("install", "farsite"):
-        raise ValueError(f"WINDNINJA_SOURCE must be 'install' or 'farsite', got {wind_source!r}")
-    steps = [
+def plan() -> list[tuple[str, str]]:
+    """Return the ordered [(step_key, module_name), ...]."""
+    return [
         ("landfire",        "getLandfireProductsForFireSim"),
         ("split_bands",     "splitLandfireTifBands"),
         ("adj_phi",         "makePhiAndAdjFiles"),
         ("weather",         "downloadWeatherData"),
         ("live_moisture",   "liveFuelMoisture"),
-    ]
-    if wind_source == "install":
-        steps.append(("windninja", "runWindninja"))
-    steps += [
+        ("windninja",       "runWindninja"),
         ("nelson",          "applyNelsonModel"),
         ("barrier",         "getBarrierFile"),
         ("elmfire_inputs",  "createElmfireInputFiles"),
         ("prepare_farsite", "prepareFarsite"),
+        ("run_elmfire",     "runElmfireCase"),
+        ("run_farsite",     "runFarsiteCase"),
     ]
-    if wind_source == "install":
-        steps += [("run_elmfire", "runElmfireCase"), ("run_farsite", "runFarsiteCase")]
-    else:
-        steps += [
-            ("run_farsite",             "runFarsiteCase"),
-            ("farsite_wind_to_geotiff", "farsiteWindToGeotiff"),
-            ("run_elmfire",             "runElmfireCase"),
-        ]
-    return steps
 
 
 def describe_wind() -> str:
-    if cfg.WINDNINJA_SOURCE == "farsite":
-        return "farsite"
     return f"windninja/{cfg.WINDNINJA_MODE}"
 
 

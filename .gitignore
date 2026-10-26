@@ -7,3 +7,7 @@ nelson_csharp/
 
 # Machine-specific config overrides
 pipelineConfig_local.py
+
+# Local scratch: old ELMFIRE scripts, archives
+elmfire/
+*.zip

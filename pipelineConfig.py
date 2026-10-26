@@ -61,7 +61,6 @@ BATCH_HEARTBEAT_MIN         = 10        # minutes between batch progress heartbe
 PREFLIGHT_MIN_FREE_GB       = 50        # warn when FIRE_ROOT has less free disk than this
 SETUP_PIPELINE_MAX_WORKERS  = 0         # parallel workers for getSatelliteEndTimes (0 = available CPUs)
 MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
-WINDNINJA_SOURCE            = "install"             # "install" (run WindNinja) | "farsite" (derive winds from FARSITE run)
 
 # Wall-clock limits for external programs (hours, 0 = none).  A hung program is
 # killed and the case fails at that step instead of holding a worker until the

@@ -3,7 +3,9 @@
 Environment checks run before a batch starts.
 
 Catches, in seconds, the problems that would otherwise make every case fail
-hours into a SLURM job: a missing executable or module, an unset LFPS_EMAIL,
+hours into a SLURM job: a missing executable, one that can't start (missing shared
+libraries, no .NET runtime for Nelson, FARSITE not launching under Wine), an
+unreadable PROJ database for WindNinja, an unset LFPS_EMAIL,
 a missing barrier dataset, no outbound internet on the compute node, too
 little disk, or more worker threads than allocated CPUs.
 
@@ -63,6 +65,63 @@ def _windninja() -> tuple[str, str]:
     return FAIL, f"not found in conda env '{cfg.WINDNINJA_CONDA_ENV}' (WINDNINJA_CONDA_ENV)"
 
 
+def _missing_libs(exe: str | Path) -> list[str]:
+    """Shared libraries ldd can't resolve for exe ([] if fine or ldd unavailable)."""
+    try:
+        out = subprocess.run(["ldd", str(exe)], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [line.split()[0] for line in out.splitlines() if "not found" in line]
+
+
+def _launch(cmd: list[str], timeout: int, **kw) -> tuple[int | None, str]:
+    """(returncode, combined output); returncode None on timeout or if it can't start."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+        return p.returncode, p.stdout + p.stderr
+    except subprocess.TimeoutExpired:
+        return None, f"no exit within {timeout} s"
+    except OSError as e:
+        return None, str(e)
+
+
+def _nelson(exe: Path) -> tuple[str, str]:
+    """Without arguments Nelson prints its usage — proves the .NET runtime loads."""
+    rc, out = _launch([str(exe)], 60, cwd=str(exe.parent))
+    if "Usage" in out:
+        return OK, str(exe)
+    first = next((l for l in out.splitlines() if l.strip()), f"exit {rc}")
+    return FAIL, f"{exe} does not start: {first.strip()[:120]} (.NET 8 runtime installed? DOTNET_ROOT?)"
+
+
+_WINE_ERRORS = ("could not load", "cannot find", "bad exe format", "not a valid win32", "wine client error")
+
+
+def _farsite(exe: Path) -> tuple[str, str]:
+    """Start the FARSITE exe under Wine with no arguments (prints usage and exits)."""
+    rc, out = _launch(["wine64", str(exe)], 120, cwd=str(exe.parent),
+                      env={**os.environ, "WINEDEBUG": "-all"})
+    low = out.lower()
+    if any(e in low for e in _WINE_ERRORS):
+        first = next(l for l in out.splitlines() if any(e in l.lower() for e in _WINE_ERRORS))
+        return FAIL, f"wine64 can't start it: {first.strip()[:120]}"
+    if rc is None:
+        return WARN, f"{exe} started but {out} (first Wine run creating its prefix?)"
+    return OK, f"{exe} (starts under wine64)"
+
+
+def _proj_db(exe: str) -> tuple[str, str]:
+    """WindNinja needs a readable proj.db (else no grid-north correction of wind directions).
+    PROJ looks in PROJ_DATA (older: PROJ_LIB), else in <install prefix>/share/proj."""
+    var = "PROJ_DATA" if os.environ.get("PROJ_DATA") else "PROJ_LIB" if os.environ.get("PROJ_LIB") else None
+    dirs = os.environ[var].split(os.pathsep) if var else [str(Path(exe).resolve().parent.parent / "share" / "proj")]
+    for d in dirs:
+        db = Path(d) / "proj.db"
+        if db.is_file() and os.access(db, os.R_OK):
+            return OK, str(db)
+    return WARN, f"no readable proj.db in {os.pathsep.join(dirs)} ({var or 'WindNinja prefix'})"
+
+
 def _existing(path: Path) -> Path:
     """path, or its nearest existing parent (FIRE_ROOT may not exist before setup)."""
     while not path.exists() and path != path.parent:
@@ -74,7 +133,6 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
     """fresh=True: outputs will be cleaned first, so every case needs every download.
     folders=None: checked before setup — no cases yet, so every download is needed."""
     inputs = cfg.INPUTS_SUBDIR_NAME
-    install = cfg.WINDNINJA_SOURCE == "install"
     res: list[tuple[str, str, str]] = []
 
     def add(level, name, detail=""):
@@ -96,7 +154,7 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
                             ("satellite points", cfg.SATELLITE_GPKG)):
             add(OK if Path(path).exists() else FAIL, f"data {label}", str(path))
         need_lfps = need_wx = ["all"]
-        need_wn = ["all"] if install else []
+        need_wn = ["all"]
     else:
         no_meta = [f.name for f in folders if not (f / METADATA_FILENAME).exists()]
         add(FAIL if no_meta else OK, "case metadata",
@@ -107,7 +165,7 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
         gsi = cfg.LIVE_FUEL_MOISTURE_SOURCE == "gsi"
         need_wx = [f for f in folders if fresh or not (f / inputs / cfg.WXS_FILE_NAME).exists()
                    or (gsi and not (f / inputs / "live_fuel_moisture.json").exists())]
-        need_wn = [f for f in folders if fresh or not (f / inputs / cfg.WS_TIF_NAME).exists()] if install else []
+        need_wn = [f for f in folders if fresh or not (f / inputs / cfg.WS_TIF_NAME).exists()]
 
     # ---- credentials ----------------------------------------------------------
     if need_lfps:
@@ -121,14 +179,29 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
         tools.append("gdalbuildvrt")
     for t in tools:
         path = _which(t)
-        add(OK if path else FAIL, f"exe {Path(str(t)).name}", path or "not found on PATH")
+        missing = _missing_libs(path) if path and t != "wine64" else []
+        add(FAIL if not path or missing else OK, f"exe {Path(str(t)).name}",
+            f"{path}: missing libraries {' '.join(missing)}" if missing else path or "not found on PATH")
     farsite = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
-    add(OK if farsite.exists() else FAIL, "FARSITE binary", str(farsite))
+    if not farsite.exists():
+        add(FAIL, "FARSITE binary", f"{farsite} not found")
+    elif _which("wine64"):
+        level, detail = _farsite(farsite)
+        add(level, "FARSITE binary", detail)
     nelson = Path(cfg.NELSON_EXE)
-    add(OK if nelson.exists() else FAIL, "Nelson model", str(nelson))
+    level, detail = _nelson(nelson) if nelson.exists() else (FAIL, f"{nelson} not found")
+    add(level, "Nelson model", detail)
     if need_wn:
         level, detail = _windninja()
         add(level, "WindNinja_cli", detail)
+        if not cfg.WINDNINJA_CONDA_ENV:   # in another env, that env's activation sets PROJ_DATA
+            wn = _which("WindNinja_cli")
+            if wn:
+                missing = _missing_libs(wn)
+                if missing:
+                    add(FAIL, "WindNinja_cli libs", f"missing {' '.join(missing)}")
+                level, detail = _proj_db(wn)
+                add(level, "PROJ database", detail)
 
     # ---- datasets -----------------------------------------------------------------
     for label, path, required in (("roads", cfg.ROADS_GPKG, True),

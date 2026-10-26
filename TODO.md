@@ -42,7 +42,7 @@ Effort: S = hours, M = a day or two.
       LANDFIRE / OpenMeteo / HRRR for all cases; compute job runs the rest.
 - [x] **CPU budget (S).** Derive worker/thread defaults from `sched_getaffinity` /
       `SLURM_CPUS_PER_TASK`; set `OMP_NUM_THREADS`/`GDAL_NUM_THREADS` per case; PDF workers likewise.
-- [ ] **Preflight: runtime checks (S).** Only checks executables exist; could check they actually
+- [x] **Preflight: runtime checks (S).** Only checks executables exist; could check they actually
       start (`ldd`, Nelson's .NET runtime, `wine64` prefix / FARSITE launch).
 
 ## Speed
@@ -53,8 +53,8 @@ Effort: S = hours, M = a day or two.
 - [ ] **Setup reads national datasets in full (M).** Satellite gpkg, MTBS, NIFC FOD: use pyogrio
       `where=`/`bbox=`/`columns=`. Drop the forced `set_crs(..., allow_override=True)`.
 - [ ] **HRRR shared cache (M).** Overlapping fires re-download the same hours.
-- [ ] **`snap_to_valid_fuel` (S).** Re-reads a growing window one ring at a time (`common.py:150`);
-      double the radius or use a distance transform.
+- [x] **`snap_to_valid_fuel` (S).** Re-reads a growing window one ring at a time (`common.py:150`);
+      double the radius or use a distance transform.  Done: doubling window, exact nearest pixel.
 
 ## Succinctness
 
@@ -71,9 +71,16 @@ Effort: S = hours, M = a day or two.
       `WINDNINJA_MODE="wxModel"`.
 - [ ] **Package it (M).** `pip install -e .` instead of `sys.path` hacks in every entry point.
 
+## Bugs found along the way
+
+- [x] **FARSITE wind source removed.** `WINDNINJA_SOURCE="farsite"` had been broken since the switch to
+      Wine; dropped it (and `farsiteWindToGeotiff.py`).  Winds always come from WindNinja.
+- [x] **WindNinja PROJ errors on HPC.** "Open of …/share/proj failed" → no grid-north correction.
+      Fixed on the cluster (2026-10); README troubleshooting + preflight `PROJ database` check.
+
 ## Docs / hygiene
 
-- [ ] **README is stale (S).** Says FARSITE is native / Wine not required (`README.md:102,493`);
+- [x] **README is stale (S).** Says FARSITE is native / Wine not required (`README.md:102,493`);
       code uses `wine64 TestFARSITE.exe`. Report filename, section numbers, Nelson clone dir
       (`nelson_csharp` vs repo name `Nelson-Dead-Fuel-Moisture`).
-- [ ] **Repo hygiene (S).** Ignore `elmfire/`, `*.zip`; remove stale `__pycache__`.
+- [x] **Repo hygiene (S).** Ignore `elmfire/`, `*.zip`; remove stale `__pycache__`.

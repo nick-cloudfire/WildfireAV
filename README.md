@@ -47,9 +47,7 @@ Data/
 │   ├── createElmfireInputFiles.py     ← step 8:  write ELMFIRE namelist (.data)
 │   ├── prepareFarsite.py              ← step 9:  create FARSITE inputs (LCP, etc.)
 │   ├── runElmfireCase.py              ← step 10: execute ELMFIRE
-│   ├── runFarsiteCase.py              ← step 11: execute FARSITE (Linux native)
-│   └── farsiteWindToGeotiff.py       ← step 12: extract ws/wd from FARSITE winds
-│                                         (only when WINDNINJA_SOURCE=farsite)
+│   └── runFarsiteCase.py              ← step 11: execute FARSITE (Wine)
 
 # Validation report
 ├── validation/
@@ -72,7 +70,7 @@ Data/
 │   ├── osm_conus_roads.gpkg           ← OSM road network
 │   ├── grwl.gpkg                      ← Global River Widths from Landsat waterways
 │   └── osm_conus_rivers.gpkg          ← Backup river polygons
-└── nelson_csharp/                     ← Nelson dead-fuel model (C# source + binary)
+└── nelson_csharp/                     ← Nelson dead-fuel model (clone of Nelson-Dead-Fuel-Moisture)
 ```
 
 ---
@@ -87,7 +85,8 @@ Data/
 | GDAL CLI (`gdal_translate`, `gdalbuildvrt`, `ogr2ogr`) | on `$PATH` |
 | WindNinja CLI (`WindNinja_cli`) | conda env (see `WINDNINJA_CONDA_ENV`) |
 | ELMFIRE executable (`elmfire`) | on `$PATH` |
-| FARSITE Linux binary (`TestFARSITE`) | `pipelineConfig.FARSITE_FB_DIR` |
+| FARSITE Windows binary (`TestFARSITE.exe`) | `FARSITE_FB_DIR` / `FARSITE_EXE_NAME` |
+| Wine (`wine64`) | on `$PATH` |
 | Nelson C# model | `pipelineConfig.NELSON_EXE` |
 | LFPS API access (USGS email) | `LFPS_EMAIL` environment variable |
 | OpenMeteo ERA5 (free, no key) | `pipelineConfig.OPENMETEO_URL` |
@@ -96,9 +95,10 @@ Data/
 
 ## WSL setup
 
-This pipeline is designed to run inside **Windows Subsystem for Linux (WSL2)**
-with Ubuntu 24.04.  FARSITE runs as a natively compiled Linux executable so
-Wine is not required.
+This pipeline runs on Linux: a laptop under **Windows Subsystem for Linux
+(WSL2)** with Ubuntu 24.04, or an HPC cluster (SLURM, see
+[Running on an HPC](#running-on-an-hpc)).  FARSITE is the Windows
+`TestFARSITE.exe`, run through Wine.
 
 ### 1. Enable WSL2
 
@@ -140,21 +140,12 @@ All GDAL CLI tools (`gdal_translate`, `gdalbuildvrt`, `ogr2ogr`) come with the
 ### 4. Install ELMFIRE
 
 Follow the [ELMFIRE build instructions](https://github.com/lautenberger/elmfire).
-The compiled `elmfire` executable must be on PATH inside the `elmfire` conda
-environment.  Set `ELMFIRE_PATH_TO_GDAL` in `pipelineConfig.py` to the `bin/`
-directory of the same conda environment, e.g.:
+The compiled `elmfire` executable must be on PATH inside the conda
+environment.  `ELMFIRE_PATH_TO_GDAL` (the GDAL tools ELMFIRE calls) defaults to
+the running environment's `bin/`, falling back to wherever `gdal_translate` is
+on PATH; override it only if ELMFIRE needs a different GDAL.
 
-```python
-ELMFIRE_PATH_TO_GDAL = "/home/<user>/miniconda3/envs/elmfire/bin/"
-```
-
-> **HRRR mode (`WINDNINJA_MODE = "hrrrLocal"`, default)** downloads only
-> TMP/UGRD/VGRD/TCDC from the public HRRR archive on Google Cloud (no
-> credentials needed), crops them to the case and hands them to WindNinja as a
-> `PASTCAST-GCP-HRRR-CONUS-3-KM_*.zip` via `forecast_filename`.  Set
-> `WINDNINJA_MODE = "wxsFile"` for the old domain-average behaviour.
-
-### 5. Install WindNinja (optional — only needed for `WINDNINJA_SOURCE="install"`)
+### 5. Install WindNinja
 
 Follow the instructions in the [WindNinja Github](https://github.com/firelab/windninja/wiki/Building-WindNinja-on-Linux-22.04). 
 Note that the pipeline was setup in Ubuntu-24.04, when asked to run scripts for 22.04, run the provided files for 24.04 instead.
@@ -165,64 +156,69 @@ i.e. the environment the pipeline runs in.  If it lives in a different conda
 environment, set `WINDNINJA_CONDA_ENV` to that name and it is called through
 `conda run -n <env>`.  `python pipeline/preflight.py` tells you which one it found.
 
-### 6. Build or install the native Linux FARSITE binary
+With `WINDNINJA_MODE = "hrrrLocal"` (default) the pipeline downloads only the
+HRRR analysis hours it needs (TMP/UGRD/VGRD/TCDC, byte ranges from the public
+archive on Google Cloud, no credentials), crops them to the case and hands them
+to WindNinja as a `PASTCAST-GCP-HRRR-CONUS-3-KM_*.zip`.  `"wxModel"` lets
+WindNinja download the pastcast itself; `"wxsFile"` is the old domain-average
+initialisation from `weather.wxs`.
 
-The pipeline now runs FARSITE as a natively compiled Linux executable — Wine
-is no longer required.  Obtain or build the `TestFARSITE` Linux binary and
-place it in any directory on the machine (e.g. `/home/<user>/farsite/src/`).
+### 6. Install Wine and the FARSITE binary
 
-Set `FARSITE_FB_DIR` in `pipelineConfig.py` to that directory and
-`FARSITE_EXE_NAME` to the executable filename:
+FARSITE is the Windows `TestFARSITE.exe` (not included in this repository),
+run with `WINEDEBUG=-all wine64 TestFARSITE.exe farsite.txt` from each case's
+`farsite/` folder.
 
-```python
-FARSITE_FB_DIR   = Path("/home/<user>/farsite/src")
-FARSITE_EXE_NAME = "TestFARSITE"
-```
-
-Verify:
 ```bash
-/home/<user>/farsite/src/TestFARSITE --help
+sudo apt install -y wine64
+mkdir -p ~/farsite/bin && cp TestFARSITE.exe ~/farsite/bin/   # default FARSITE_FB_DIR
 ```
+
+If it lives elsewhere, set `FARSITE_FB_DIR` / `FARSITE_EXE_NAME` in
+`pipelineConfig_local.py`.
 
 ### 7. Clone and configure
 
 ```bash
 cd /home/<user>/elmfire_validation
-git clone https://github.com/nick-cloudfire/autoValidate.git Data
+git clone https://github.com/nick-cloudfire/wildfireAV.git Data
 cd Data
 ```
 
 ### 8. Install the Nelson dead-fuel moisture model
 
-run the following command to clone the Nelson Dead Fuel Moisture model made for this pipeline,
-based on WUINITY-PREACT Copyright (C) 2025 Jonathan Wahlqvist.
-
-git clone https://github.com/nick-cloudfire/Nelson-Dead-Fuel-Moisture.git <nelson_csharp>
+Clone the Nelson dead-fuel moisture model made for this pipeline (based on
+WUINITY-PREACT, Copyright (C) 2025 Jonathan Wahlqvist) into `nelson_csharp/`
+and build it:
 
 ```bash
+git clone https://github.com/nick-cloudfire/Nelson-Dead-Fuel-Moisture.git nelson_csharp
+
 # Install .NET 8 SDK
 sudo apt install -y dotnet-sdk-8.0
 
 # Build the release binary
-cd /home/<user>/elmfire_validation/Data/nelson_csharp
+cd nelson_csharp
 dotnet publish -c Release
 ```
 The compiled binary path is set automatically by `pipelineConfig.NELSON_EXE`.
 
-### 9. Obtain the native Linux FARSITE binary
+### 9. Machine-specific settings
 
-The FARSITE Linux binary is not included in this repository.  Place the
-compiled `TestFARSITE` executable in any directory (e.g.
-`/home/<user>/farsite/src/`).  No Wine SDK layout is required — only the
-single binary needs to be present at the path pointed to by `FARSITE_FB_DIR`.
-
-Edit `pipelineConfig.py` — at minimum update:
+The repository root and every derived path are detected automatically.  Put
+only the settings that differ on this machine in `pipelineConfig_local.py`
+(gitignored) next to `pipelineConfig.py`, e.g. on an HPC:
 
 ```python
-BASE_VALIDATION  = Path("/home/<user>/elmfire/elmfire_validation/")
-FARSITE_FB_DIR   = Path("/home/<user>/farsite/src")   # dir containing TestFARSITE
-WINDNINJA_SOURCE = "install"                           # or "farsite"
+from pathlib import Path
+FIRE_ROOT          = Path("/scratch/<user>/FirePairs")
+MAX_PARALLEL_CASES = 96
 ```
+
+Any scalar setting can also be set per job with `WAV_<NAME>` environment
+variables (`export WAV_FIRE_ROOT=/scratch/$USER/FirePairs`).
+`python pipeline/preflight.py` lists the active overrides and flags local keys
+the config no longer knows.
 
 `LANDFIRE_EMAIL` is read from the `LFPS_EMAIL` environment variable (not stored
 in the config file).  Add the following to your `~/.bashrc` (or SLURM job script):
@@ -275,7 +271,9 @@ Road GeoPackages can be extracted from a US OSM `.pbf` file using
 LANDFIRE terrain and fuel rasters are fetched automatically per case via the
 USGS LFPS API (step 1 of the simulation pipeline).  No manual download needed —
 only a valid email registered at [USGS LFPS](https://lfps.usgs.gov), set via the
-`LFPS_EMAIL` environment variable (see WSL setup step 9).
+`LFPS_EMAIL` environment variable (see WSL setup step 9).  On an HPC whose
+compute nodes have no internet, run `tools/prefetchLandfire.py` on the login
+node first.
 
 ### Required layout before first run
 
@@ -288,37 +286,30 @@ Data/
 │   ├── osm_conus_roads.gpkg
 │   ├── grwl.gpkg
 │   └── osm_conus_rivers.gpkg
-└── nelson_csharp/                (built from source — see WSL setup above)
+└── nelson_csharp/                (built from source — see WSL setup step 8)
 
-# FARSITE binary lives outside this repo (see WSL setup step 6 / 9):
-/home/<user>/farsite/src/TestFARSITE
+# FARSITE binary lives outside this repo (see WSL setup step 6):
+~/farsite/bin/TestFARSITE.exe
 ```
 
 ---
 
 ## Quick-start
 
-### 1. Configure `pipelineConfig.py`
+### 1. Configure
 
-Edit the **User-modifiable parameters** and **Paths** sections:
+Defaults work out of the box (cases go to `../FirePairs`).  Put what you want
+to change in `pipelineConfig_local.py`, e.g.:
 
 ```python
-# Paths
-BASE_VALIDATION      = Path("/home/<user>/elmfire/elmfire_validation/")
-FIRE_ROOT            = Path("/scratch/yourname/FirePairs")
-FARSITE_FB_DIR       = Path("/home/<user>/farsite/src")   # dir with TestFARSITE binary
-
-# User parameters
-MIN_FIRE_YEAR        = 2024
-MAX_FIRE_YEAR        = 2025
-MAX_PARALLEL_CASES   = 14
-
-# Wind source: "install" = WindNinja, "farsite" = derive winds from FARSITE output
-WINDNINJA_SOURCE     = "install"
-
-# ELMFIRE
-ELMFIRE_PATH_TO_GDAL = "/path/to/your/conda/envs/elmfire/bin/"
+from pathlib import Path
+FIRE_ROOT          = Path("/scratch/yourname/FirePairs")
+MIN_FIRE_YEAR      = 2024
+MAX_FIRE_YEAR      = 2025
+MAX_PARALLEL_CASES = 14          # 0 = one per available CPU (SLURM-aware)
 ```
+
+Then check the environment: `python pipeline/preflight.py`.
 
 ### 2. Run the full pipeline
 
@@ -374,9 +365,7 @@ its own process, `--workers` at a time.  Every step skips itself when its
 outputs already exist (outputs are written atomically, so a killed case never
 leaves a half-written file behind), so re-running resumes where a case
 stopped.  `python pipeline/runPipelineParallel.py --list-steps` prints the
-active step plan, which depends on `WINDNINJA_SOURCE`:
-
-#### `WINDNINJA_SOURCE = "install"` (default)
+active step plan:
 
 ```
 Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
@@ -390,27 +379,7 @@ Step 7   getBarrierFile                 →  inputs/barrier.tif
 Step 8   createElmfireInputFiles        →  <case>.data
 Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
 Step 10  runElmfireCase                 →  outputs/time_of_arrival_*.tif
-Step 11  runFarsiteCase                 →  farsite/outputs/farsite_ArrivalTime.asc
-```
-
-#### `WINDNINJA_SOURCE = "farsite"`
-
-```
-Step 1   getLandfireProductsForFireSim  →  LANDFIRE.tif
-Step 2   splitLandfireTifBands          →  inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
-Step 3   makePhiAndAdjFiles             →  inputs/{adj,phi}.tif
-Step 4   downloadWeatherData            →  inputs/weather.wxs
-Step 4b  liveFuelMoisture               →  inputs/live_fuel_moisture.json  (GSI live herb/woody %)
-Step 5   (WindNinja skipped)
-Step 6   applyNelsonModel               →  inputs/{m1,m10,m100}.tif
-Step 7   getBarrierFile                 →  inputs/barrier.tif
-Step 8   createElmfireInputFiles        →  <case>.data
-Step 9   prepareFarsite                 →  farsite/{landscape.lcp, farsite.input, …}
-Step 10  runFarsiteCase                 →  farsite/outputs/farsite_ArrivalTime.asc
-                                            farsite/outputs/farsite_WindGrids.tif
-Step 11  farsiteWindToGeotiff           →  inputs/{ws,wd}.tif  (from FARSITE wind grids)
-                                            deletes farsite_WindGrids.tif after extraction
-Step 12  runElmfireCase                 →  outputs/time_of_arrival_*.tif
+Step 11  runFarsiteCase                 →  farsite/outputs/farsite_Arrival Time.tif
 ```
 
 #### Live fuel moisture
@@ -448,7 +417,9 @@ PREFLIGHT
             00015  10/11 run_elmfire      31m
 ```
 
-- **Preflight** (seconds) checks executables, `LFPS_EMAIL`, barrier datasets,
+- **Preflight** (seconds; up to 2 min on a first Wine run) checks that the
+  executables exist and start (`ldd`, Nelson's .NET runtime, FARSITE under
+  Wine, WindNinja's PROJ database), `LFPS_EMAIL`, barrier datasets,
   internet access to LFPS / OpenMeteo / HRRR (compute nodes often have none),
   free disk and CPU oversubscription — only for what the cases still need.
   `--no-preflight` skips it.
@@ -472,11 +443,12 @@ PREFLIGHT
 
 ### Phase: pdf (`--start pdf`)
 
-Generates `validation.pdf` in `FIRE_ROOT`.  The report contains one page per
-case plus four summary pages:
+Generates `validation_report.pdf` in `FIRE_ROOT`.  The report contains a cover
+page, four summary pages and one page per case:
 
 | Page | Content |
 |------|---------|
+| Cover | Case counts (successful / non-ignited / failed) |
 | Per-case | Burn-mask map, area-evolution curves, metrics table |
 | Summary 1 | Similarity scores vs. average wind speed |
 | Summary 2 | Similarity scores vs. burn area and fire duration (log x) |
@@ -503,20 +475,19 @@ python cleanPipelineOutputs.py --from-step windninja --include-wind-tifs --cases
 
 ---
 
-## FARSITE execution (native Linux)
+## FARSITE execution (Wine)
 
-FARSITE runs as a natively compiled Linux executable (`TestFARSITE`).
-Wine is not required.  `runFarsiteCase.py` writes a plain-text command file
-(`farsite_linux.txt`) with absolute Linux paths and invokes the binary directly.
-The completion sentinel is `farsite_ArrivalTime.asc`; the script verifies this
-file exists after the run.
+`prepareFarsite.py` writes `farsite.txt`, a one-line command file with paths
+relative to the case's `farsite/` folder, and `farsite.input` with all run
+parameters and inline weather/moisture.  `runFarsiteCase.py` runs
+`WINEDEBUG=-all wine64 TestFARSITE.exe farsite.txt` there, with the
+`FARSITE_TIMEOUT_H` limit (on timeout the whole process group, including
+`wineserver` children, is killed).  The completion sentinel is
+`farsite/outputs/farsite_Arrival Time.tif`.
 
-After a successful FARSITE run, outputs are cleaned automatically:
-- **`WINDNINJA_SOURCE = "install"`**: keeps only `farsite_ArrivalTime.asc`;
-  deletes all other FARSITE outputs including `farsite_WindGrids.tif`.
-- **`WINDNINJA_SOURCE = "farsite"`**: keeps `farsite_ArrivalTime.asc` +
-  `farsite_WindGrids.tif` until `farsiteWindToGeotiff.py` has extracted
-  `ws.tif`/`wd.tif`, then deletes `farsite_WindGrids.tif` too.
+FARSITE gets the same WindNinja winds as ELMFIRE (`winds.atm` + ASCII grids
+built from `ws.tif`/`wd.tif`).  After a successful run only
+`farsite_Arrival Time.tif` is kept.
 
 ---
 
@@ -554,11 +525,11 @@ After a successful FARSITE run, outputs are cleaned automatically:
 ├── farsite/
 │   ├── landscape.lcp                    FARSITE landscape file (converted from LANDFIRE)
 │   ├── farsite.input                    FARSITE control file
-│   ├── farsite_linux.txt                command-line args file (auto-generated)
+│   ├── farsite.txt                      one-line FARSITE command file
 │   ├── ignition.shp                     reprojected ignition point
 │   ├── barrier.shp                      merged barrier polygons (optional)
 │   └── outputs/
-│       └── farsite_ArrivalTime.asc      FARSITE time-of-arrival output (sentinel)
+│       └── farsite_Arrival Time.tif     FARSITE time-of-arrival output (sentinel)
 ├── outputs/
 │   └── time_of_arrival_<HH>.tif         ELMFIRE TOA raster
 └── scratch/                             ELMFIRE working directory
@@ -572,8 +543,8 @@ All settings are documented inline in `pipelineConfig.py`.
 
 | Section | Key settings |
 |---------|-------------|
-| 1. User-modifiable | `MIN/MAX_FIRE_YEAR`, `MTBS_AREA_THRESHOLD_ACRES`, `MAX_PARALLEL_CASES`, `BATCH_HEARTBEAT_MIN`, `PREFLIGHT_MIN_FREE_GB`, `WINDNINJA_SOURCE` |
-| 2. Paths | `FIRE_ROOT`, `BASE_VALIDATION`, `FARSITE_FB_DIR` |
+| 1. User-modifiable | `MIN/MAX_FIRE_YEAR`, `MTBS_AREA_THRESHOLD_ACRES`, `MAX_PARALLEL_CASES`, `BATCH_HEARTBEAT_MIN`, `PREFLIGHT_MIN_FREE_GB`, `*_TIMEOUT_H` |
+| 2. Paths | `FIRE_ROOT`, `INPUTS_DATA_ROOT`, `FARSITE_FB_DIR` / `FARSITE_EXE_NAME`, derived input/output paths |
 | 3. File/dir names | CSV names, shapefile names, subfolder names |
 | 4. Column names | master CSV column keys shared across scripts |
 | 5. MTBS / USFS | field names in raw input datasets |
@@ -581,11 +552,11 @@ All settings are documented inline in `pipelineConfig.py`.
 | 7. Satellite | coverage fraction, gap tolerance, buffer size |
 | 8. Weather | OpenMeteo URL and model |
 | 9. WindNinja | `WINDNINJA_MODE`, conda env, chunk size, output height, mesh resolution factor, `HRRR_*` download settings |
-| 10. ELMFIRE | exe, GDAL path, simulation parameters, moisture content |
-| 11. FARSITE | `FARSITE_FB_DIR` (dir with Linux binary), `FARSITE_EXE_NAME` |
-| 12. Barrier | road/water widths, OSM field names |
-| 13. LFPS API | base URL, product list, `LFPS_POLL_SLEEP_S`, `LFPS_POLL_HEARTBEAT_S` |
-| 14. Nelson | path to C# executable |
+| 10. ELMFIRE | exe, GDAL path, simulation parameters |
+| 11. Barrier | road/water widths, OSM field names |
+| 12. LFPS API | base URL, products, polling, `LFPS_JOB_TIMEOUT_H`, `LFPS_MAX_ATTEMPTS` |
+| 13. Nelson | path to C# executable (derived, section 2) |
+| 14. Live fuel moisture | `LIVE_FUEL_MOISTURE_SOURCE`, constant values, `GSI_*` model parameters |
 
 ---
 
@@ -593,13 +564,14 @@ All settings are documented inline in `pipelineConfig.py`.
 
 ### LANDFIRE job is stuck in queue
 - The LFPS queue can be very long when many users are submitting jobs simultaneously.
-  The pipeline polls indefinitely — it will wait however long the queue takes.
+  By default (`LFPS_JOB_TIMEOUT_H = 0`) the pipeline waits however long the
+  queue takes; network blips keep polling the same job.
 - A "still waiting…" heartbeat is logged every `LFPS_POLL_HEARTBEAT_S` seconds
   (default 1800 s / 30 min) so you can confirm the job is still live.
 - Do **not** kill and resubmit the job — that adds another entry to the queue and
   makes the wait longer for everyone.
-- Retries (up to `MAX_RETRIES = 3`) are reserved for genuine failures (job status
-  `Failed` or network errors), not queue waits.
+- New submissions (up to `LFPS_MAX_ATTEMPTS = 3`) are reserved for genuine
+  failures (job status `Failed`, a timed-out job, a bad download), not queue waits.
 - Check that `LFPS_EMAIL` is set in your shell (`echo $LFPS_EMAIL`) and that the
   address is registered at https://lfps.usgs.gov.
 
@@ -615,17 +587,24 @@ All settings are documented inline in `pipelineConfig.py`.
   full log is in `inputs/windninja/chunk_NNN/` (or `step_NNN/` in wxsFile mode).
 - Exit 127 / "command not found": `WindNinja_cli` is not on PATH in the job's
   environment — activate its env in the job script, or set `WINDNINJA_CONDA_ENV`.
-- `PROJ: proj_create_from_database: Open of …/share/proj failed`: the env's PROJ
-  database is not found; `export PROJ_DATA=$CONDA_PREFIX/share/proj` (older
-  PROJ: `PROJ_LIB`).
+- `PROJ: proj_create_from_database: Open of …/share/proj failed` (followed by
+  "Unable to calculate angle departure from north"): WindNinja can't open its
+  PROJ database, so wind directions aren't corrected for grid north.  Run
+  WindNinja from the pipeline's own env (`WINDNINJA_CONDA_ENV = None`, with
+  `WindNinja_cli` installed in that env) and check
+  `PROJ_DATA=$CONDA_PREFIX/share/proj` (older PROJ: `PROJ_LIB`).  On an HPC
+  with `proj.db` on a network filesystem, copying `share/proj` to node-local
+  disk at job start and pointing `PROJ_DATA` there also helps.
 - "Failed to connect to ninjastorm.firelab.org" is WindNinja's version check
   and harmless on nodes without internet.
 - Ensure the DEM covers the full fire domain.
 
 ### FARSITE fails
-- Confirm `FARSITE_FB_DIR` points to the directory containing `TestFARSITE` and that the binary is executable: `ls -l $FARSITE_FB_DIR/TestFARSITE`.
-- Check `farsite/pipeline.log` for error output.
-- Run the binary interactively with the generated `farsite_linux.txt` to test: `<FARSITE_FB_DIR>/TestFARSITE farsite/farsite_linux.txt`.
+- `python pipeline/preflight.py` checks that `wine64` is on PATH and that
+  `FARSITE_FB_DIR/FARSITE_EXE_NAME` exists.
+- Check the case's `pipeline.log` for FARSITE's output.
+- Re-run it by hand: `cd <case>/farsite && wine64 ~/farsite/bin/TestFARSITE.exe farsite.txt`
+  (drop `WINEDEBUG=-all` to see Wine's messages).
 
 ### ELMFIRE fails
 - Confirm `ELMFIRE_EXE` is on PATH: `which elmfire`.
