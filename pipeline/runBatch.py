@@ -62,14 +62,7 @@ def is_done(case_dir: Path) -> bool:
 
 
 def discover(case_root: Path, specific: list[str] | None, skip_done: bool) -> list[Path]:
-    if specific:
-        folders = [case_root / name.zfill(5) if name.isdigit() else case_root / name for name in specific]
-        for f in folders:
-            if not f.is_dir():
-                print(f"WARNING: case directory not found: {f}")
-        folders = [f for f in folders if f.is_dir()]
-    else:
-        folders = case_dirs(case_root)
+    folders = case_dirs(case_root, specific)
     if skip_done:
         before = len(folders)
         folders = [f for f in folders if not is_done(f)]

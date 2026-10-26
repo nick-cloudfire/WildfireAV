@@ -181,7 +181,7 @@ If it lives elsewhere, set `FARSITE_FB_DIR` / `FARSITE_EXE_NAME` in
 
 ```bash
 cd /home/<user>/elmfire_validation
-git clone https://github.com/nick-cloudfire/wildfireAV.git Data
+git clone https://github.com/nick-cloudfire/WildfireAV.git Data
 cd Data
 ```
 

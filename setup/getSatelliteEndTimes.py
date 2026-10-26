@@ -3,32 +3,25 @@
 Step 3 of setupPipeline: compute SatelliteIgnitionTime and SatelliteEndTime
 for each fire case using satellite hotspot data.
 
-Algorithm per case
+Algorithm per case (see satellite.py for the coverage curve)
 ------------------
-1. Load burn polygon (firescar.gpkg) and reproject to EPSG:5070.
-2. Spatially filter satellite hotspot points to those inside the burn.
-3. SatelliteIgnitionTime = earliest time to reach 5% cumulative hotspot
-   coverage of the effective burn area (starting from point_discovery).
-4. SatelliteEnd_chain = last timestamp in the first unbroken chain of
-   detections (gap <= SAT_CHAIN_MAX_GAP_DAYS) after SatelliteIgnitionTime.
-5. SatelliteEnd_coverage = earliest time to reach COVERAGE_FRACTION of
-   effective burn area after SatelliteIgnitionTime.
-6. SatelliteEndTime = SatelliteEnd_coverage.
-7. EventEndTime = min(SatelliteEndTime, point_fireout).
+1. Load the burn polygon (firescar.gpkg) in EPSG:5070 and keep the hotspots
+   inside it detected after point_discovery - 1 day.
+2. SatelliteIgnitionTime = when coverage first reaches 5 % of the effective
+   burn area.
+3. SatelliteEnd_chain    = last detection of the unbroken chain that starts
+   at SatelliteIgnitionTime.
+4. SatelliteEndTime (= SatelliteEnd_coverage) = when coverage, counted from
+   SatelliteIgnitionTime, first reaches COVERAGE_FRACTION.
+5. EventEndTime = min(SatelliteEndTime, point_fireout).
 
 Outputs
 -------
 - fire_pairs_summary_with_satellite.csv  (updated master CSV)
 - <case_dir>/satellite_points.gpkg       (per-case hotspot points inside burn)
 
-Performance notes
------------------
-- Satellite points are reprojected to EPSG:5070 ONCE and a spatial index
-  is built ONCE across all cases.
-- Bounding-box pre-filter plus time filter before the expensive within() check.
-- Coverage computation uses batched unary_union to avoid repeated per-point unions.
-- Per-case processing runs in parallel (up to SETUP_PIPELINE_MAX_WORKERS threads).
-  The shared sat_gdf / sat_sindex are read-only so threading is safe.
+The satellite layer is loaded and indexed once; cases run in parallel
+threads (SETUP_PIPELINE_MAX_WORKERS) that only read it.
 """
 
 from __future__ import annotations
@@ -39,12 +32,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
-from shapely.ops import unary_union
 
 import pipelineConfig
+import satellite
 
 
 # ---------------------------------------------------------------------------
@@ -66,17 +58,11 @@ COL_SAT_END_AREA    = pipelineConfig.COL_SAT_END_AREA
 
 SATELLITE_GPKG      = pipelineConfig.SATELLITE_GPKG
 SATELLITE_LAYER     = pipelineConfig.SATELLITE_LAYER_NAME
-DATE_COL            = pipelineConfig.SAT_DATE_COL
-TIME_COL            = pipelineConfig.SAT_TIME_COL
 BURN_SHAPE_NAME     = pipelineConfig.BURN_SHAPE_NAME
 CASE_SAT_GPKG_NAME  = pipelineConfig.CASE_SAT_GPKG_NAME
 
-MAX_GAP             = pd.Timedelta(days=pipelineConfig.SAT_CHAIN_MAX_GAP_DAYS)
-HOTSPOT_BUFFER_DIST = pipelineConfig.SAT_HOTSPOT_BUFFER_DIST
 COVERAGE_FRACTION   = pipelineConfig.COVERAGE_FRACTION
-SAT_IGNITION_WINDOW = pd.Timedelta(days=pipelineConfig.SAT_IGNITION_WINDOW_DAYS)
-UNION_BLOCK_SIZE    = pipelineConfig.SAT_UNION_BLOCK_SIZE
-BUFFER_RESOLUTION   = pipelineConfig.SAT_BUFFER_RESOLUTION
+IGNITION_FRACTION   = 0.05      # coverage fraction that marks the satellite ignition time
 
 MAX_WORKERS         = pipelineConfig.SETUP_PIPELINE_MAX_WORKERS
 
@@ -84,115 +70,6 @@ MAX_WORKERS         = pipelineConfig.SETUP_PIPELINE_MAX_WORKERS
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _build_sat_datetime(df: pd.DataFrame) -> pd.Series:
-    """Combine ACQ_DATE and ACQ_TIME (HHMM) into a UTC-naive datetime Series."""
-    date_str = df[DATE_COL].astype(str).str.slice(0, 10)
-    time_str = df[TIME_COL].astype(str).str.zfill(4)
-    return pd.to_datetime(date_str + " " + time_str, errors="coerce")
-
-
-def _find_chain_end(
-    times: pd.Series,
-    start_dt: pd.Timestamp,
-    max_gap: pd.Timedelta,
-) -> pd.Timestamp:
-    """Return the last timestamp in the first unbroken chain after *start_dt*."""
-    times = times[times >= start_dt].sort_values().reset_index(drop=True)
-    if times.empty:
-        return pd.NaT
-    last = times.iloc[0]
-    for t in times.iloc[1:]:
-        if (t - last) <= max_gap:
-            last = t
-        else:
-            break
-    return last
-
-
-def _union_geoms(geom_list):
-    geom_list = [g for g in geom_list if g is not None and not g.is_empty]
-    return unary_union(geom_list) if geom_list else None
-
-
-def _time_to_coverage_fraction(
-    pts_in_burn: gpd.GeoDataFrame,
-    burn_geom,
-    start_dt: pd.Timestamp,
-    buffer_dist: float,
-    max_gap: pd.Timedelta,
-    coverage_fraction: float,
-    block_size: int,
-    buffer_resolution: int,
-) -> tuple[pd.Timestamp, float]:
-    """
-    Return (timestamp, final_satellite_area_m2) at which the cumulative
-    buffered hotspot area first reaches *coverage_fraction* of the effective
-    burn area within the first continuous chain after *start_dt*.
-
-    The second return value is always the total satellite coverage area at the
-    end of the chain (used by callers to compare with the burn area).
-    """
-    pts = pts_in_burn[pts_in_burn["sat_datetime"] >= start_dt].copy()
-    if pts.empty:
-        return pd.NaT, float(burn_geom.area)
-
-    pts = pts.sort_values("sat_datetime").reset_index(drop=True)
-
-    # Restrict to first unbroken chain
-    chain_idx = [0]
-    last_t = pts.loc[0, "sat_datetime"]
-    for i in range(1, len(pts)):
-        t = pts.loc[i, "sat_datetime"]
-        if (t - last_t) > max_gap:
-            break
-        chain_idx.append(i)
-        last_t = t
-    pts = pts.loc[chain_idx].reset_index(drop=True)
-
-    times  = pts["sat_datetime"].tolist()
-    buffers = [
-        g.buffer(buffer_dist, quad_segs=buffer_resolution)
-        for g in pts.geometry.values
-    ]
-
-    final_union    = _union_geoms(buffers)
-    final_sat_area = 0.0 if final_union is None else float(final_union.area)
-
-    effective_area = min(float(burn_geom.area), final_sat_area)
-    target_area    = coverage_fraction * effective_area
-
-    if target_area <= 0.0:
-        return pd.NaT, final_sat_area
-
-    cumulative = None
-    n = len(buffers)
-
-    for b0 in range(0, n, block_size):
-        b1 = min(b0 + block_size, n)
-        block_union = _union_geoms(buffers[b0:b1])
-        if block_union is None:
-            continue
-
-        trial = block_union if cumulative is None else unary_union([cumulative, block_union])
-        if float(trial.area) < target_area:
-            cumulative = trial
-            continue
-
-        # Threshold crossed somewhere in this block – find the exact point
-        local = cumulative
-        for i in range(b0, b1):
-            buf = buffers[i]
-            if buf is None:
-                continue
-            local = buf if local is None else unary_union([local, buf])
-            if float(local.area) >= target_area:
-                return times[i], final_sat_area
-
-        return times[b1 - 1], final_sat_area
-
-    return times[-1], final_sat_area
-
 
 def _safe_to_gpkg(gdf: gpd.GeoDataFrame, out_path: Path, layer: str) -> None:
     """Write a GeoDataFrame to a GeoPackage layer, sanitising column types."""
@@ -268,7 +145,7 @@ def _process_case(
         return None, "SKIP  burn polygon empty"
     if burn_gdf.crs is None:
         burn_gdf = burn_gdf.set_crs("EPSG:4326")
-    burn_gdf  = burn_gdf.to_crs("EPSG:5070")
+    burn_gdf  = burn_gdf.to_crs(satellite.AREA_CRS)
     burn_geom = burn_gdf.union_all()
 
     # Bounding-box + time pre-filter
@@ -284,48 +161,25 @@ def _process_case(
     if pts_in_burn.empty:
         return None, "SKIP  no satellite points inside burn"
 
-    # --- Satellite ignition time (5% coverage) ---
-    sat_ignition_dt, _ = _time_to_coverage_fraction(
-        pts_in_burn=pts_in_burn,
-        burn_geom=burn_geom,
-        start_dt=ignition_dt - pd.Timedelta(days=1),
-        buffer_dist=HOTSPOT_BUFFER_DIST,
-        max_gap=MAX_GAP,
-        coverage_fraction=0.05,
-        block_size=UNION_BLOCK_SIZE,
-        buffer_resolution=BUFFER_RESOLUTION,
-    )
+    # --- Satellite ignition time: 5 % coverage ---
+    sat_ignition_dt = satellite.coverage_curve(
+        pts_in_burn, burn_geom, ignition_dt - pd.Timedelta(days=1)).time_to_fraction(IGNITION_FRACTION)
     if pd.isna(sat_ignition_dt):
         return None, "SKIP  no sat ignition (5% coverage threshold)"
-
-    start_dt = sat_ignition_dt
-    updates  = {SAT_IGNITION_COL: sat_ignition_dt}
+    updates = {SAT_IGNITION_COL: sat_ignition_dt}
 
     # Save per-case satellite points (each case writes to its own folder — no collision)
     pts_export = pts_in_burn.copy()
     pts_export["folder_name"]     = folder_name
     pts_export["ignition_dt"]     = ignition_dt
-    pts_export["sat_ignition_dt"] = start_dt
-    if {"ACQ_DATE", "ACQ_TIME"}.issubset(pts_export.columns):
-        pts_export["ACQ_DATETIME"] = _build_sat_datetime(pts_export)
+    pts_export["sat_ignition_dt"] = sat_ignition_dt
     _safe_to_gpkg(pts_export, case_folder / CASE_SAT_GPKG_NAME, layer="points_in_burn")
 
-    # --- Chain end time ---
-    chain_end = _find_chain_end(pts_in_burn["sat_datetime"], start_dt, MAX_GAP)
-    updates[COL_SAT_CHAIN_END] = chain_end
-
-    # --- Coverage end time ---
-    coverage_end, _ = _time_to_coverage_fraction(
-        pts_in_burn=pts_in_burn,
-        burn_geom=burn_geom,
-        start_dt=start_dt,
-        buffer_dist=HOTSPOT_BUFFER_DIST,
-        max_gap=MAX_GAP,
-        coverage_fraction=COVERAGE_FRACTION,
-        block_size=UNION_BLOCK_SIZE,
-        buffer_resolution=BUFFER_RESOLUTION,
-    )
-
+    # --- Chain end and coverage end, counted from the satellite ignition ---
+    chain = satellite.first_chain(pts_in_burn, sat_ignition_dt)
+    updates[COL_SAT_CHAIN_END] = chain["sat_datetime"].max()
+    coverage_end = satellite.coverage_curve(pts_in_burn, burn_geom, sat_ignition_dt
+                                            ).time_to_fraction(COVERAGE_FRACTION)
     updates[COL_SAT_END_AREA] = coverage_end
     if pd.isna(coverage_end):
         return updates, f"PARTIAL  sat={_fmt_dt(sat_ignition_dt)}  no coverage end"
@@ -360,9 +214,8 @@ def _process_case(
 
 def main() -> None:
     print("Loading satellite points …")
-    sat_gdf = gpd.read_file(SATELLITE_GPKG, layer=SATELLITE_LAYER)
-    sat_gdf = sat_gdf.set_crs("EPSG:5070", inplace=False, allow_override=True)
-    sat_gdf["sat_datetime"] = _build_sat_datetime(sat_gdf)
+    sat_gdf = gpd.read_file(SATELLITE_GPKG, layer=SATELLITE_LAYER).to_crs(satellite.AREA_CRS)
+    sat_gdf["sat_datetime"] = satellite.detection_times(sat_gdf)
     sat_gdf = sat_gdf.dropna(subset=["sat_datetime"])
     sat_sindex = sat_gdf.sindex
     print(f"Loaded {len(sat_gdf)} satellite points.\n")

@@ -47,7 +47,7 @@ Effort: S = hours, M = a day or two.
 
 ## Speed
 
-- [ ] **Validation PDF memory (M).** Keeps every case's float64 TOA raster in memory until the end
+- [x] **Validation PDF memory (M).** Keeps every case's float64 TOA raster in memory until the end
       — OOM risk with hundreds of cases. Keep area curves only, render case pages as they finish,
       use float32. Re-enable metrics CSV export (`getValidationPDF.py:1564`).
 - [ ] **Setup reads national datasets in full (M).** Satellite gpkg, MTBS, NIFC FOD: use pyogrio
@@ -58,11 +58,11 @@ Effort: S = hours, M = a day or two.
 
 ## Succinctness
 
-- [ ] **One satellite-chain/coverage module (M).** Four copies with different params
+- [x] **One satellite-chain/coverage module (M).** Four copies with different params
       (`getSatelliteEndTimes`, `debugSatelliteEndTimes`, `getValidationPDF`, `compareOutputs`).
 - [x] **Delete or merge `tools/compareOutputs.py` (S).** 967 lines, duplicates the PDF, stale paths.
       Review `debugBandCounts.py`, `getWeatherHerbie.py` too.
-- [ ] **Split `getValidationPDF.py` (M).** 1571 lines → metrics / case pages / summary pages;
+- [x] **Split `getValidationPDF.py` (M).** 1571 lines → metrics / case pages / summary pages;
       replace silent `except Exception` blocks with logged warnings.
 - [x] **Deduplicate helpers (S).** Two log tees, two retry helpers, two clean routines,
       re-implemented `fmt_duration` in `prefetchLandfire.py`.

@@ -182,9 +182,6 @@ SAT_TIME_COL            = "ACQ_TIME"        # HHMM string column
 SAT_CHAIN_MAX_GAP_DAYS  = 7                 # max gap (days) in a continuous chain
 SAT_HOTSPOT_BUFFER_DIST = 200               # hotspot buffer radius (m, in EPSG:5070)
 COVERAGE_FRACTION       = 0.9               # fraction of effective burn area required
-SAT_IGNITION_WINDOW_DAYS = 7               # search window after point ignition (days)
-SAT_UNION_BLOCK_SIZE    = 64               # geometries per block in batched union
-SAT_BUFFER_RESOLUTION   = 8               # shapely buffer quad_segs (segments per quadrant)
 
 # =============================================================================
 # 8. WEATHER DOWNLOAD (OpenMeteo ERA5)

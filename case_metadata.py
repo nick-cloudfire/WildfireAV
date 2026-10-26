@@ -4,7 +4,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 from datetime import date, datetime, timezone
 import pandas as pd
 import pipelineConfig as cfg
@@ -71,8 +71,15 @@ def read_case_metadata(case_dir: Path) -> Dict[str, Any]:
     return data
 
 
-def case_dirs(root: Optional[Path] = None) -> list[Path]:
+def case_dirs(root: Optional[Path] = None, only: Optional[list[str]] = None) -> list[Path]:
+    """Numbered case folders under root, or just the ids in *only* (leading zeros optional)."""
     root = Path(root or cfg.FIRE_ROOT)
+    if only:
+        folders = [root / (name.zfill(5) if name.isdigit() else name) for name in only]
+        for f in folders:
+            if not f.is_dir():
+                print(f"WARNING: case directory not found: {f}")
+        return [f for f in folders if f.is_dir()]
     if not root.exists():
         return []
     return sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit())
