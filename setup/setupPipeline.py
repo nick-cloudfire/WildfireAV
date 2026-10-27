@@ -9,7 +9,7 @@ Steps
 1.  processScarsAndPoints        – match MTBS perimeters to USFS ignition points
 2.  separateScarsAndPointsToCases – split into numbered case folders
 3.  getSatelliteEndTimes         – compute satellite-based start/end times
-4.  eraseInvalidCases            – remove cases shorter than MIN_HOURS_DURATION
+4.  eraseInvalidCases            – remove cases seen by < MIN_SATELLITE_OVERPASSES overpasses
 5.  write_metadata_from_summary  – write case_metadata.json to each folder
 
 Outputs (written to FIRE_ROOT)

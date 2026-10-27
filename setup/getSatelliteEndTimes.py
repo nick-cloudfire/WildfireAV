@@ -13,6 +13,9 @@ Algorithm per case (see satellite.py for the coverage curve)
 4. SatelliteEndTime (= SatelliteEnd_coverage) = when coverage, counted from
    SatelliteIgnitionTime, first reaches COVERAGE_FRACTION.
 5. EventEndTime = min(SatelliteEndTime, point_fireout).
+6. SatelliteOverpasses = distinct detection times (satellite overpasses, however
+   many hotspots each saw) from SatelliteIgnitionTime to EventEndTime, i.e.
+   over the simulated window.  eraseInvalidCases filters on it.
 
 Outputs
 -------
@@ -54,6 +57,7 @@ FIREOUT_COL         = pipelineConfig.COL_POINT_FIREOUT
 EVENT_END_COL       = pipelineConfig.EVENT_END_COL
 COL_SAT_CHAIN_END   = pipelineConfig.COL_SAT_CHAIN_END_TIME
 COL_SAT_END_AREA    = pipelineConfig.COL_SAT_END_AREA
+COL_SAT_OVERPASSES  = pipelineConfig.COL_SAT_OVERPASSES
 
 SATELLITE_GPKG      = pipelineConfig.SATELLITE_GPKG
 SATELLITE_LAYER     = pipelineConfig.SATELLITE_LAYER_NAME
@@ -177,8 +181,8 @@ def _process_case(
     # --- Chain end and coverage end, counted from the satellite ignition ---
     chain = satellite.first_chain(pts_in_burn, sat_ignition_dt)
     updates[COL_SAT_CHAIN_END] = chain["sat_datetime"].max()
-    coverage_end = satellite.coverage_curve(pts_in_burn, burn_geom, sat_ignition_dt
-                                            ).time_to_fraction(COVERAGE_FRACTION)
+    curve = satellite.coverage_curve(pts_in_burn, burn_geom, sat_ignition_dt)   # one point per overpass
+    coverage_end = curve.time_to_fraction(COVERAGE_FRACTION)
     updates[COL_SAT_END_AREA] = coverage_end
     if pd.isna(coverage_end):
         return updates, f"PARTIAL  sat={_fmt_dt(sat_ignition_dt)}  no coverage end"
@@ -198,11 +202,13 @@ def _process_case(
         final_end = min(end_time, fireout_dt)
 
     updates[EVENT_END_COL] = final_end
+    overpasses = int((curve.times <= final_end).sum())
+    updates[COL_SAT_OVERPASSES] = overpasses
 
     duration_d = (final_end - sat_ignition_dt).total_seconds() / 86400
     status = (
         f"OK    {_fmt_dt(sat_ignition_dt)} → {_fmt_dt(final_end)}"
-        f"  ({duration_d:.1f}d)"
+        f"  ({duration_d:.1f}d, {overpasses} overpasses)"
     )
     return updates, status
 
@@ -232,6 +238,7 @@ def main() -> None:
     for col in (SAT_IGNITION_COL, COL_SAT_CHAIN_END, COL_SAT_END_AREA,
                 SAT_END_COL, EVENT_END_COL):
         master[col] = pd.NaT
+    master[COL_SAT_OVERPASSES] = pd.array([pd.NA] * len(master), dtype="Int64")
 
     n = len(master)
     w = len(str(n))   # digit width for progress counter

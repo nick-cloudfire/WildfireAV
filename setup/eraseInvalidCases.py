@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Step 4 of setupPipeline: remove cases whose satellite-derived duration is too short.
+Step 4 of setupPipeline: remove cases with too little satellite evidence of spread.
 
-A case is kept only when:
-  SatelliteEndTime - SatelliteIgnitionTime >= MIN_HOURS_DURATION hours
-  (and both timestamps are present)
+A case is kept only when it has SatelliteIgnitionTime and SatelliteEndTime and
+the satellites saw it at >= MIN_SATELLITE_OVERPASSES distinct detection times
+(SatelliteOverpasses, counted over the simulated window by getSatelliteEndTimes).
+Overpasses, not hotspots: one pass can report many hotspots at once.
 
 Invalid case folders are deleted from disk and the summary CSV is updated
 in-place to remove those rows.
@@ -35,7 +36,8 @@ COL_SAT_CHAIN_END   = cfg.COL_SAT_CHAIN_END_TIME
 COL_POINT_DISCOVERY = cfg.COL_POINT_DISCOVERY
 COL_POINT_FIREOUT   = cfg.COL_POINT_FIREOUT
 EVENT_END_COL       = cfg.EVENT_END_COL
-MIN_HOURS           = cfg.MIN_HOURS_DURATION
+COL_OVERPASSES      = cfg.COL_SAT_OVERPASSES
+MIN_OVERPASSES      = cfg.MIN_SATELLITE_OVERPASSES
 
 
 def _load_df() -> pd.DataFrame:
@@ -70,12 +72,12 @@ def main() -> pd.DataFrame:
             reason = f"missing {COL_SAT_IGNITION}"
         elif pd.isna(sat_end):
             reason = f"missing {COL_SAT_END}"
+        elif pd.isna(row.get(COL_OVERPASSES)):
+            reason = f"missing {COL_OVERPASSES} (re-run getSatelliteEndTimes)"
+        elif row[COL_OVERPASSES] < MIN_OVERPASSES:
+            reason = f"{int(row[COL_OVERPASSES])} satellite overpasses < {MIN_OVERPASSES}"
         else:
-            duration_h = (sat_end - sat_ign).total_seconds() / 3600
-            if duration_h < MIN_HOURS:
-                reason = f"duration {duration_h:.1f} h < {MIN_HOURS} h"
-            else:
-                reason = None
+            reason = None
         valid = reason is None
         keep_mask.append(valid)
         if not valid:

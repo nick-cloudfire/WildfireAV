@@ -66,8 +66,10 @@ folders (`FirePairs/00001/`, …). The settings named below are in
      fire-out time if that is earlier.
    - The fire's area here is the smaller of the perimeter area and the final
      covered area, so fires with sparse detections can still reach 90 %.
-4. **Filter.** Fires burning less than `MIN_HOURS_DURATION` (12 h) by
-   satellite are dropped.
+4. **Filter.** Fires seen at fewer than `MIN_SATELLITE_OVERPASSES` (4)
+   distinct detection times during the simulated window are dropped. These are
+   satellite overpasses, not hotspots: one overpass can report many hotspots.
+   With fewer, the satellite record says too little about how the fire grew.
    - With HRRR winds (the default), fires outside the HRRR CONUS grid
      (Alaska, Hawaii, Puerto Rico) are dropped too. The same check
      (`hrrr_grid.py`) also skips such fires in existing case folders.

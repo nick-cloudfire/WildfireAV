@@ -60,7 +60,8 @@ TEST_RUN_CASES              = 10        # cases run with --test (the first N cas
 BATCH_HEARTBEAT_MIN         = 10        # minutes between batch progress heartbeats (0 = off)
 PREFLIGHT_MIN_FREE_GB       = 50        # warn when FIRE_ROOT has less free disk than this
 SETUP_PIPELINE_MAX_WORKERS  = 0         # parallel workers for getSatelliteEndTimes (0 = available CPUs)
-MIN_HOURS_DURATION          = 12         # minimum valid fire duration (hours)
+MIN_SATELLITE_OVERPASSES    = 4         # keep fires seen at >= this many distinct satellite detection
+                                        # times (overpasses, not hotspots) while simulated
 
 # Wall-clock limits for external programs (hours, 0 = none).  A hung program is
 # killed and the case fails at that step instead of holding a worker until the
@@ -129,6 +130,7 @@ COL_SATELLITE_IGNITION  = "SatelliteIgnitionTime"
 COL_SATELLITE_END       = "SatelliteEndTime"
 COL_SAT_CHAIN_END_TIME  = "SatelliteEnd_chain"
 COL_SAT_END_AREA        = "SatelliteEnd_coverage"  # timestamp when area threshold reached
+COL_SAT_OVERPASSES      = "SatelliteOverpasses"    # distinct detection times in [SatelliteIgnitionTime, EventEndTime]
 EVENT_END_COL           = "EventEndTime"            # min(SatelliteEndTime, point_fireout)
 
 # Aliases used for wind/weather column routing
