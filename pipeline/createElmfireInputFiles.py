@@ -4,7 +4,8 @@ Step "elmfire_inputs": write the ELMFIRE namelist <case>/<case>.data.
 - Ignition point (ignition_point.gpkg) reprojected to the DEM CRS and snapped
   to the nearest burnable FBFM40 cell.
 - Simulation window [SatelliteIgnitionTime, EventEndTime] from case_metadata.json.
-- NUM_METEOROLOGY_TIMES = band count of inputs/ws.tif.
+- Hourly inputs (ws/wd, m1/m10/m100) must start at the ignition hour: ELMFIRE
+  reads band 1 at t = 0.  NUM_METEOROLOGY_TIMES = bands they all have.
 
 All tunable ELMFIRE parameters come from pipelineConfig (section 10).
 """
@@ -20,7 +21,8 @@ from pyproj import Transformer
 
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from common import atomic_write, case_window, for_each_case, require, skipped, snap_to_valid_fuel
+from common import (atomic_write, case_window, for_each_case, ignition_hour, require, require_starts_at,
+                    skipped, snap_to_valid_fuel)
 from liveFuelMoisture import live_moisture
 
 INPUTS = cfg.INPUTS_SUBDIR_NAME
@@ -87,7 +89,6 @@ def build_namelist(tstop_sec: float, x_ign: float, y_ign: float, current_year: i
         f"X_IGN(1)      = {x_ign:.2f}",
         f"Y_IGN(1)      = {y_ign:.2f}",
         "T_IGN(1)      = 0.00",
-        "DEBUG_LEVEL   = 0",
         "CLEAN_SCRATCH = .TRUE.",
         "/\n",
         "&MONTE_CARLO",
@@ -106,16 +107,18 @@ def _process(case_dir: Path):
         return skipped(".data namelist already exists")
     inputs = case_dir / INPUTS
     dem, fuels, ws = inputs / f"{_B[0]}.tif", inputs / f"{_B[3]}.tif", inputs / cfg.WS_TIF_NAME
+    m1 = inputs / f"{cfg.FMC_FILE_NAMES[0]}.tif"
     ign = case_dir / cfg.IGNITION_POINT_SHP_NAME
-    require(dem, fuels, ign, ws, hint="earlier steps (split_bands / windninja) did not produce these")
+    require(dem, fuels, ign, ws, m1, hint="earlier steps (split_bands / windninja / nelson) did not produce these")
 
-    start, end = case_window(read_case_metadata(case_dir), cfg.COL_SATELLITE_IGNITION, cfg.EVENT_END_COL)
+    meta = read_case_metadata(case_dir)
+    start, end = case_window(meta, cfg.COL_SATELLITE_IGNITION, cfg.EVENT_END_COL)
+    first = ignition_hour(meta)
+    n_met = min(len(require_starts_at(ws, first, "windninja")), len(require_starts_at(m1, first, "nelson")))
     with rasterio.open(dem) as ds:
         dem_crs = ds.crs
     if dem_crs is None:
         raise ValueError(f"{dem} has no CRS")
-    with rasterio.open(ws) as ds:
-        n_met = ds.count
 
     x0, y0 = _ignition_xy(dem_crs, ign)
     x, y, moved = snap_to_valid_fuel(fuels, x0, y0)

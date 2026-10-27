@@ -7,10 +7,14 @@ For each case:
 - Converts LANDFIRE.tif → landscape.lcp + landscape.prj  (gdal_translate / gdalsrsinfo)
 - Reprojects ignition_point.gpkg → ignition.shp          (ogr2ogr)
 - Merges pre-clipped barrier layers → barrier.shp         (ogr2ogr, optional)
-- Crops conditioning days from weather.wxs
-- Computes per-fuel-class mean moisture → output.fms
-- Writes farsite.txt  (single line consumed by FARSITE batch runner)
-- Writes farsite.input (all FARSITE run parameters + inline weather/moisture)
+- Computes per-fuel-class mean dead fuel moisture at the ignition hour → output.fms
+- Resamples the hourly WindNinja grids to winds/*.asc + winds.atm
+- Writes farsite.txt  (the one-line command file FARSITE is started with)
+- Writes farsite.input (run parameters, weather from the ignition hour on, moisture)
+
+FARSITE simulates exactly ELMFIRE's window, SatelliteIgnitionTime ->
+EventEndTime, so both models burn for the same time.  Input format:
+docs/farsite_input_reference.md.
 
 Standalone usage (process all cases under FIRE_ROOT):
     python prepareFarsite.py
@@ -23,7 +27,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import fiona
@@ -33,7 +37,9 @@ from rasterio.transform import Affine
 from rasterio.warp import reproject, Resampling as RioResampling
 
 import pipelineConfig as cfg
-from common import atomic_write, for_each_case, require, skipped, snap_to_valid_fuel
+from case_metadata import read_case_metadata
+from common import (atomic_write, case_window, for_each_case, ignition_hour, read_wxs, require,
+                    require_starts_at, skipped, snap_to_valid_fuel)
 from parallel_api import hours
 from liveFuelMoisture import live_moisture
 
@@ -41,7 +47,6 @@ from liveFuelMoisture import live_moisture
 # Constants
 # ---------------------------------------------------------------------------
 
-PREIGNITION_DAYS = cfg.CONDITIONING_DAYS
 M1_FILENAME      = cfg.FMC_FILE_NAMES[0]
 M10_FILENAME     = cfg.FMC_FILE_NAMES[1]
 M100_FILENAME    = cfg.FMC_FILE_NAMES[2]
@@ -52,8 +57,6 @@ WS_TIF_NAME      = cfg.WS_TIF_NAME
 WD_TIF_NAME      = cfg.WD_TIF_NAME
 
 USE_BARRIER = True   # set False to omit barrier.shp from farsite.input
-
-DECIMALS    = 0
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -86,28 +89,13 @@ def _means_by_class(classes, values, valid_mask, max_class):
     return means, cnts
 
 
-def _parse_wxs_first_last_datetimes(wxs_lines):
-    data_lines = [
-        ln.strip() for ln in wxs_lines
-        if ln.strip() and len(ln.strip()) >= 4 and ln.strip()[:4].isdigit()
-    ]
-    if not data_lines:
-        raise ValueError("No data lines found in WXS file.")
-
-    def parse_dt(line):
-        parts = line.split()
-        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-        hhmm = parts[3].zfill(4)
-        return datetime(y, m, d, int(hhmm[:2]), int(hhmm[2:]))
-
-    def _int_precip(line):
-        parts = line.split()
-        # field 6 (0-based) is HrlyPcp; FARSITE requires integer precipitation
-        parts[6] = str(int(round(float(parts[6]))))
-        return " ".join(parts)
-
-    data_lines = [_int_precip(ln) for ln in data_lines]
-    return parse_dt(data_lines[0]), parse_dt(data_lines[-1]), data_lines
+def _raws_lines(wxs, first) -> list[str]:
+    """Hourly weather rows from *first* on, in the RAWS format FARSITE reads (integer precipitation)."""
+    df = read_wxs(wxs)
+    df = df[df.index >= first]
+    return [f"{t.year} {t.month} {t.day} {t.hour * 100 + t.minute:04d} {r.temp_C:.0f} {r.rh:.0f} "
+            f"{round(r.pcp)} {r.wind_kph:.0f} {r.wind_dir_deg:.0f} {r.cloud_pct:.0f}"
+            for t, r in df.iterrows()]
 
 
 def _burn_period_lines(start_dt, end_dt):
@@ -177,16 +165,13 @@ def _write_asc(data: np.ndarray, cellsize: float, xllcorner: float, yllcorner: f
     np.savetxt(str(out_path), safe, header=header, comments="", fmt="%.4f")
 
 
-def _build_wind_grids(
-    ws_tif: Path, wd_tif: Path,
-    winds_dir: Path,
-    start_dt: datetime, end_dt: datetime,
-) -> list:
-    """Resample ws.tif/wd.tif bands to coarser ASC grids and return ATM entries.
+def _build_wind_grids(ws_tif: Path, wd_tif: Path, winds_dir: Path, band_times, end_dt) -> list:
+    """Resample ws.tif/wd.tif bands valid up to end_dt to coarser ASC grids; return ATM entries.
 
     Output resolution = source cellsize × MESH_RES_FACTOR (matches WindNinja mesh).
     Returns list of (month, day, hhmm, ws_rel_str, wd_rel_str) tuples where
-    paths are relative to winds_dir.parent (i.e. farsite_dir).
+    paths are relative to winds_dir.parent (i.e. farsite_dir).  FARSITE uses
+    each grid from its time until the next one.
     """
     winds_dir.mkdir(exist_ok=True)
     farsite_dir = winds_dir.parent
@@ -207,13 +192,10 @@ def _build_wind_grids(
                                0.0, -out_cellsize, ymax)
         yllcorner     = ymax - out_height * out_cellsize
 
-        n_bands = ws_ds.count
-        print(f"  Wind grids: {n_bands} bands → {out_width}×{out_height} @ {out_cellsize:.0f}m")
+        used = [ts for ts in band_times if ts <= end_dt]
+        print(f"  Wind grids: {len(used)} hourly bands → {out_width}×{out_height} @ {out_cellsize:.0f}m")
 
-        for i in range(n_bands):
-            ts = start_dt + timedelta(hours=i)
-            if ts > end_dt:
-                break
+        for i, ts in enumerate(used):
 
             ws_arr = np.zeros((out_height, out_width), dtype=np.float32)
             reproject(
@@ -256,6 +238,9 @@ def _process(case_dir: Path):
         return skipped("farsite.input already exists")
 
     # ---- required inputs check ----------------------------------------
+    meta = read_case_metadata(case_dir)
+    start_dt, end_dt = case_window(meta, cfg.COL_SATELLITE_IGNITION, cfg.EVENT_END_COL)   # = ELMFIRE's
+    first = ignition_hour(meta)
     required = [
         case_dir / "LANDFIRE.tif",
         case_dir / "ignition_point.gpkg",
@@ -273,12 +258,13 @@ def _process(case_dir: Path):
         ]) if USE_BARRIER else []),
     ]
     require(*required, hint="produced by earlier steps")
+    wind_times = require_starts_at(case_dir / INPUTS / WS_TIF_NAME, first, "windninja")
+    require_starts_at((case_dir / INPUTS / M1_FILENAME).with_suffix(".tif"), first, "nelson")
 
     landfire    = case_dir / "LANDFIRE.tif"
     lcp_out     = farsite_dir / "landscape.lcp"
     prj_out     = farsite_dir / "landscape.prj"
     wxs_path    = case_dir / INPUTS / cfg.WXS_FILE_NAME
-    new_wxs     = farsite_dir / "weather.wxs"
     fms_out     = farsite_dir / "output.fms"
 
     # ---- directory setup -----------------------------------------------
@@ -332,16 +318,7 @@ def _process(case_dir: Path):
             _run(cmd)
         print("  barrier.shp")
 
-    # ---- weather.wxs (trim conditioning days) --------------------------
-    raw_lines        = wxs_path.read_text().splitlines()
-    header_lines     = 4
-    rows_to_remove   = PREIGNITION_DAYS * 24
-    trimmed          = raw_lines[:header_lines] + raw_lines[header_lines + rows_to_remove:]
-    new_wxs.write_text("\n".join(trimmed) + "\n")
-    n_wx = len(trimmed) - header_lines
-    print(f"  weather.wxs  ({n_wx} records, {PREIGNITION_DAYS} conditioning days removed)")
-
-    # ---- output.fms (per-fuel mean moisture) ---------------------------
+    # ---- output.fms (per-fuel mean dead moisture, band 1 = ignition hour) ----
     fbfm,  fbfm_nodata,  _ = _read_band((case_dir / INPUTS / FBFM_FILENAME).with_suffix(".tif"))
     m1,    m1_nodata,    _ = _read_band((case_dir / INPUTS / M1_FILENAME).with_suffix(".tif"))
     m10,   m10_nodata,   _ = _read_band((case_dir / INPUTS / M10_FILENAME).with_suffix(".tif"))
@@ -363,8 +340,7 @@ def _process(case_dir: Path):
     present   = np.where(counts > 0)[0]
     herb_mc, woody_mc = live_moisture(case_dir)   # same values as ELMFIRE
     fms_lines = [
-        f"{fuel} {m1_mn[fuel]:.{DECIMALS}f} {m10_mn[fuel]:.{DECIMALS}f} "
-        f"{m100_mn[fuel]:.{DECIMALS}f} {herb_mc:.0f} {woody_mc:.0f}"
+        f"{fuel} {m1_mn[fuel]:.0f} {m10_mn[fuel]:.0f} {m100_mn[fuel]:.0f} {herb_mc:.0f} {woody_mc:.0f}"
         for fuel in present
     ]
     # prepend fuel-0 default (copy of first real class with code 0)
@@ -386,16 +362,16 @@ def _process(case_dir: Path):
     (farsite_dir / "farsite.txt").write_text(farsite_line + "\n")
 
     # ---- farsite.input -------------------------------------------------
-    wxs_file_lines                      = new_wxs.read_text().splitlines()
-    start_dt, end_dt, wxs_data_lines    = _parse_wxs_first_last_datetimes(wxs_file_lines)
-    burn_lines                          = _burn_period_lines(start_dt, end_dt)
+    wxs_file_lines = wxs_path.read_text().splitlines()
+    wxs_data_lines = _raws_lines(wxs_path, first)
+    burn_lines     = _burn_period_lines(start_dt, end_dt)
 
     # ---- wind grids (ATM file) -----------------------------------------
     winds_dir   = farsite_dir / "winds"
     atm_entries = _build_wind_grids(
         case_dir / INPUTS / WS_TIF_NAME,
         case_dir / INPUTS / WD_TIF_NAME,
-        winds_dir, start_dt, end_dt,
+        winds_dir, wind_times, end_dt,
     )
     atm_path = farsite_dir / "winds.atm"
     with atm_path.open("w", newline="\n") as f:
@@ -404,11 +380,8 @@ def _process(case_dir: Path):
             f.write(f"{month} {day} {hhmm} {ws_rel} {wd_rel}\n")
     print(f"  winds.atm    ({len(atm_entries)} entries)")
 
-    raws_elev       = next((ln for ln in wxs_file_lines if ln.startswith("RAWS_ELEVATION:")), "RAWS_ELEVATION: ")
-    raws_units_raw  = next((ln for ln in wxs_file_lines if ln.startswith("RAWS_UNITS:")),     "RAWS_UNITS: ")
-    pfx, _, val     = raws_units_raw.partition(":")
-    val_lc          = val.strip().lower()
-    raws_units      = f"{pfx}: {'Metric' if val_lc == 'metric' else 'English' if val_lc == 'english' else val.strip().title()}"
+    raws_elev  = next(ln for ln in wxs_file_lines if ln.startswith("RAWS_ELEVATION:"))
+    raws_units = "RAWS_UNITS: Metric"      # weather.wxs is written in metric (downloadWeatherData)
 
     content = [
         "FARSITE INPUTS FILE VERSION 1.0",

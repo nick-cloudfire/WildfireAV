@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import shutil
 import textwrap
 import time
@@ -37,7 +36,7 @@ import rasterio
 import pipelineConfig as cfg
 import wn_to_geotiff
 from case_metadata import read_case_metadata
-from common import case_window, fmt_duration, for_each_case, progress, require, skipped
+from common import case_window, fmt_duration, for_each_case, ignition_hour, progress, read_wxs, require, skipped
 from parallel_api import hours, run_subprocess
 
 INPUTS        = cfg.INPUTS_SUBDIR_NAME
@@ -53,32 +52,12 @@ MODES = ("hrrrLocal", "wxModel", "wxsFile")
 # weather.wxs -> hourly window
 # ---------------------------------------------------------------------------
 
-def read_wxs(path: Path) -> pd.DataFrame:
-    """Parse a RAWS .wxs file into a DataFrame indexed by naive-UTC hour."""
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    header = next((i for i, ln in enumerate(lines)
-                   if ln.strip().startswith("Year") and "WindSpd" in ln), None)
-    if header is None:
-        raise ValueError(f"no 'Year ... WindSpd' header line in {path}")
-    rows = []
-    for ln in lines[header + 1:]:
-        p = re.split(r"\s+", ln.strip())
-        if len(p) < 10:
-            continue
-        hhmm = p[3].zfill(4)
-        ts = pd.Timestamp(int(p[0]), int(p[1]), int(p[2]), int(hhmm[:2]), int(hhmm[2:]))
-        rows.append((ts, *map(float, p[4:10])))
-    df = pd.DataFrame(rows, columns=["dt", "temp_C", "rh", "pcp", "wind_kph", "wind_dir_deg", "cloud_pct"])
-    if df.empty:
-        raise ValueError(f"no data rows in {path}")
-    return df.set_index("dt").sort_index()
-
-
 def hourly_window(case_dir: Path, wxs: pd.DataFrame) -> pd.DataFrame:
     """WXS rows WindNinja must cover for this case (same bounds as before the refactor).
 
     wxsFile: [floor(start), floor(end)].  wxModel/hrrrLocal: one extra hour each
-    side, [floor(start - 1h), floor(end + 1h)].
+    side, [floor(start - 1h), floor(end + 1h)]; the hour before ignition is run
+    but not stacked into ws/wd.tif (see wn_to_geotiff first_hour).
     """
     start, end = case_window(read_case_metadata(case_dir), cfg.COL_SATELLITE_IGNITION, cfg.COL_SATELLITE_END)
     if MODE != "wxsFile":
@@ -266,7 +245,8 @@ def _process(case_dir: Path):
             print(f"    chunk {i + 1} done in {fmt_duration(time.monotonic() - t_chunk)}")
 
     print(f"  WindNinja finished in {fmt_duration(time.monotonic() - t0)}; stacking to GeoTIFF")
-    wn_to_geotiff.main(workdir, inputs, landscape, clean=True)
+    wn_to_geotiff.main(workdir, inputs, landscape, clean=True,
+                       first_hour=ignition_hour(read_case_metadata(case_dir)))
 
 
 def main(case_dir=None):

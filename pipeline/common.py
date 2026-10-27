@@ -21,6 +21,7 @@ message and also publishes it to the case's ``status.json`` (see
 from __future__ import annotations
 
 import os
+import re
 import time
 import traceback
 from contextlib import contextmanager
@@ -105,6 +106,75 @@ def case_window(meta: dict, start_col: str, end_col: str) -> tuple[pd.Timestamp,
     if end <= start:
         raise ValueError(f"{end_col} ({end}) is not after {start_col} ({start})")
     return start, end
+
+
+# ---------------------------------------------------------------------------
+# Hourly inputs: weather, winds and dead fuel moisture share one clock
+# ---------------------------------------------------------------------------
+# Band 1 of every hourly raster (ws/wd from WindNinja, m1/m10/m100 from Nelson)
+# is the hour containing the satellite ignition, floor(SatelliteIgnitionTime),
+# and band i is i - 1 hours later.  Each band's valid time (UTC) is written into
+# the GeoTIFF so the alignment can be checked (and seen in QGIS / gdalinfo).
+
+BAND_TIME_TAG = "VALID_TIME_UTC"
+
+
+def ignition_hour(meta: dict) -> pd.Timestamp:
+    """The hour containing the satellite ignition: valid time of band 1 of every hourly raster."""
+    start, _ = case_window(meta, cfg.COL_SATELLITE_IGNITION, cfg.COL_SATELLITE_END)
+    return start.floor("h")
+
+
+def read_wxs(path: Path) -> pd.DataFrame:
+    """Parse a RAWS .wxs file into a DataFrame indexed by naive-UTC hour."""
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    header = next((i for i, ln in enumerate(lines)
+                   if ln.strip().startswith("Year") and "WindSpd" in ln), None)
+    if header is None:
+        raise ValueError(f"no 'Year ... WindSpd' header line in {path}")
+    rows = []
+    for ln in lines[header + 1:]:
+        p = re.split(r"\s+", ln.strip())
+        if len(p) < 10:
+            continue
+        hhmm = p[3].zfill(4)
+        ts = pd.Timestamp(int(p[0]), int(p[1]), int(p[2]), int(hhmm[:2]), int(hhmm[2:]))
+        rows.append((ts, *map(float, p[4:10])))
+    df = pd.DataFrame(rows, columns=["dt", "temp_C", "rh", "pcp", "wind_kph", "wind_dir_deg", "cloud_pct"])
+    if df.empty:
+        raise ValueError(f"no data rows in {path}")
+    return df.set_index("dt").sort_index()
+
+
+def write_band_times(tif: Path, times) -> None:
+    """Record each band's valid time (UTC) as its description and a VALID_TIME_UTC tag."""
+    with rasterio.open(tif, "r+") as ds:
+        if ds.count != len(times):
+            raise ValueError(f"{tif.name}: {ds.count} bands but {len(times)} times")
+        for i, t in enumerate(pd.DatetimeIndex(times), start=1):
+            ds.set_band_description(i, f"{t:%Y-%m-%d %H:%M} UTC")
+            ds.update_tags(i, **{BAND_TIME_TAG: f"{t:%Y-%m-%dT%H:%M}Z"})
+
+
+def read_band_times(tif: Path) -> pd.DatetimeIndex | None:
+    """Valid times written by write_band_times, or None for a raster without them."""
+    with rasterio.open(tif) as ds:
+        tags = [ds.tags(i).get(BAND_TIME_TAG) for i in range(1, ds.count + 1)]
+    if not all(tags):
+        return None
+    return pd.DatetimeIndex([pd.Timestamp(t).tz_localize(None) for t in tags])
+
+
+def require_starts_at(tif: Path, first: pd.Timestamp, rerun_from: str) -> pd.DatetimeIndex:
+    """Band times of an hourly raster; raise unless band 1 is valid at *first*."""
+    times = read_band_times(tif)
+    hint = (f"re-run from that step: python cleanPipelineOutputs.py --from-step {rerun_from} "
+            f"--include-wind-tifs --cases {tif.parent.parent.name}")
+    if times is None:
+        raise ValueError(f"{tif.name} has no band times (made before they were recorded); {hint}")
+    if times[0] != first:
+        raise ValueError(f"{tif.name} band 1 is valid at {times[0]}, expected the ignition hour {first}; {hint}")
+    return times
 
 
 def for_each_case(fn: Callable[[Path], object], case_dir=None):

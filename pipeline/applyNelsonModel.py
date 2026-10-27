@@ -4,7 +4,9 @@ Step "nelson": dead-fuel moisture (m1/m10/m100) with the Nelson C# model.
 
 1. Convert cc/dem/slp/asp GeoTIFFs to ENVI BSQ (the C# model's input format).
 2. Run NELSON_EXE on weather.wxs + those grids (CONDITIONING_DAYS spin-up).
-3. Convert the m1/m10/m100 BSQ outputs back to compressed GeoTIFFs.
+3. Convert the m1/m10/m100 BSQ outputs back to compressed GeoTIFFs, one band
+   per weather hour after the spin-up; band 1 is the ignition hour, like the
+   winds, and each band's time is recorded (common.write_band_times).
 4. Remove the intermediate BSQ/HDR/XML files.
 """
 
@@ -12,7 +14,10 @@ import os
 from pathlib import Path
 
 import pipelineConfig as cfg
-from common import atomic_write, for_each_case, require, skipped
+import rasterio
+
+from case_metadata import read_case_metadata
+from common import atomic_write, for_each_case, ignition_hour, read_wxs, require, skipped, write_band_times
 from parallel_api import hours, run_subprocess
 
 NELSON_EXE = Path(cfg.NELSON_EXE)
@@ -52,12 +57,24 @@ def _process(case_dir: Path):
                         str(cfg.CONDITIONING_DAYS)], cwd=str(NELSON_EXE.parent),
                        timeout=hours(cfg.NELSON_TIMEOUT_H))
 
+        # Nelson writes one band per weather row after the spin-up rows
+        times = read_wxs(wxs).index[cfg.CONDITIONING_DAYS * 24:]
+        if times[0] != ignition_hour(read_case_metadata(case_dir)):
+            raise ValueError(f"weather.wxs hour {cfg.CONDITIONING_DAYS * 24} is {times[0]}, not the ignition "
+                             "hour; re-run from the weather step")
         for out in outs:
             bsq = out.with_suffix(".bsq")
             require(bsq, hint="Nelson exited 0 but did not write this output")
             with atomic_write(out) as tmp:
                 _translate(bsq, tmp, "-of", "GTiff", "-co", "COMPRESS=ZSTD", "-co", "BIGTIFF=YES",
                            "-co", f"NUM_THREADS={os.environ.get('GDAL_NUM_THREADS', 'ALL_CPUS')}")
+                with rasterio.open(tmp) as ds:
+                    n = ds.count
+                if n == len(times) - 1:
+                    raise RuntimeError(f"Nelson wrote {n} bands, one short of {len(times)}: {NELSON_EXE} is an "
+                                       "old build that starts an hour late.  Update and rebuild it: "
+                                       "cd nelson_csharp && git pull && dotnet publish -c Release")
+                write_band_times(tmp, times)
     finally:
         _clean(inputs)
     print(f"  Wrote {', '.join(p.name for p in outs)}")

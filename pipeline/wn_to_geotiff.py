@@ -5,7 +5,10 @@ inputs/wd.tif (direction, degrees), one band per hour in time order.
 
 WindNinja names its outputs ``*_MM-DD-YYYY_HHMM_<res>_vel.asc`` / ``..._ang.asc``
 (time in WINDNINJA_TIME_ZONE, UTC).  The stacks are padded or cropped to the
-LANDFIRE grid so ELMFIRE can read them alongside the fuels.
+LANDFIRE grid so ELMFIRE can read them alongside the fuels.  Hours before
+``first_hour`` (the case's ignition hour) are left out, so band 1 is the
+ignition hour like every other hourly input; each band's time is recorded
+(common.write_band_times).
 """
 
 import re
@@ -17,7 +20,9 @@ import numpy as np
 import rasterio
 from rasterio.transform import Affine
 
-from common import atomic_write
+import pandas as pd
+
+from common import atomic_write, write_band_times
 import pipelineConfig as cfg
 from parallel_api import hours, run_subprocess
 
@@ -32,20 +37,20 @@ def time_key(name: str) -> str | None:
     return f"{int(yyyy):04d}{int(mm):02d}{int(dd):02d}{hhmm}"  # YYYYMMDDHHMM
 
 
-def ordered_files(in_dir: Path, suffix: str) -> list[Path]:
+def ordered_files(in_dir: Path, suffix: str, first_hour=None) -> list[tuple[pd.Timestamp, Path]]:
+    """(valid time, file) of WindNinja's *_<suffix>.asc grids from first_hour on, in time order."""
     # Non-recursive glob: staged .asc files live directly in in_dir.
     # Using rglob would also find the originals inside chunk_NNN/ subdirs,
     # causing every timestep to appear twice in the stack.
     files = []
     for p in in_dir.glob(f"*_{suffix}.asc"):
-        if not p.is_file():
-            continue
         k = time_key(p.name)
-        if k is None:
+        if not p.is_file() or k is None:
             continue
-        files.append((k, p))
-    files.sort(key=lambda x: x[0])
-    return [p for _, p in files]
+        t = pd.Timestamp(f"{k[:8]} {k[8:]}")
+        if first_hour is None or t >= first_hour:
+            files.append((t, p))
+    return sorted(files)
 
 
 def _asc_extent(asc_path: Path) -> tuple[float, float, float, float]:
@@ -74,10 +79,17 @@ def _asc_extent(asc_path: Path) -> tuple[float, float, float, float]:
     return xmin, ymin, xmax, ymax
 
 
-def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
-    files = ordered_files(in_dir, suffix)
-    if not files:
-        raise RuntimeError(f"WindNinja produced no *_{suffix}.asc files (MM-DD-YYYY_HHMM) in {in_dir}")
+def make_stack(in_dir: Path, suffix: str, out_tif: Path, first_hour=None) -> pd.DatetimeIndex:
+    """Stack the grids into out_tif; returns the band times."""
+    timed = ordered_files(in_dir, suffix, first_hour)
+    if not timed:
+        raise RuntimeError(f"WindNinja produced no *_{suffix}.asc files (MM-DD-YYYY_HHMM) "
+                           f"from {first_hour or 'the start'} on in {in_dir}")
+    times, files = pd.DatetimeIndex([t for t, _ in timed]), [p for _, p in timed]
+    if first_hour is not None and times[0] != first_hour:
+        raise RuntimeError(f"WindNinja output starts at {times[0]}, after the ignition hour {first_hour}")
+    if (times.to_series().diff().dropna() != pd.Timedelta(hours=1)).any():
+        raise RuntimeError(f"WindNinja *_{suffix}.asc grids are not consecutive hours")
 
     xmin, ymin, xmax, ymax = _asc_extent(files[0])
 
@@ -100,7 +112,9 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path) -> None:
         ], timeout=hours(cfg.GDAL_TIMEOUT_H))
     finally:
         vrt.unlink(missing_ok=True)
-    print(f"  {out_tif.name.lstrip('.').replace('.partial', '')}: {len(files)} hourly bands")
+    print(f"  {out_tif.name.lstrip('.').replace('.partial', '')}: {len(files)} hourly bands, "
+          f"{times[0]:%Y-%m-%d %H:%M} -> {times[-1]:%Y-%m-%d %H:%M} UTC")
+    return times
 
 def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
     """
@@ -192,15 +206,16 @@ def clean_windninja_outputs(in_dir: Path):
 
     print(f"  Cleaned windninja/: removed {n_dirs} subdirectories, {n_files} files")
 
-def main(in_dir, out_dir, reference_tif=None, clean=False):
+def main(in_dir, out_dir, reference_tif=None, clean=False, first_hour=None):
     in_dir  = Path(in_dir)
     out_dir = Path(out_dir)
     # wd first: ws.tif is the step's "done" marker, so it must appear last.
     for suffix, name in (("ang", "wd.tif"), ("vel", "ws.tif")):
         with atomic_write(out_dir / name) as tmp:
-            make_stack(in_dir, suffix, tmp)
+            times = make_stack(in_dir, suffix, tmp, first_hour)
             if reference_tif is not None:
                 pad_to_reference(tmp, Path(reference_tif))
+            write_band_times(tmp, times)
 
     if clean:
         clean_windninja_outputs(in_dir)

@@ -92,6 +92,18 @@ FARSITE receives the same per-hour WindNinja grids (through an ATM file), the
 same weather and live moisture, and initial dead fuel moisture averaged per
 fuel model from the Nelson grids. FARSITE has no per-cell dead moisture input.
 
+**One clock for all hourly inputs.**
+- Band 1 of the wind (`ws/wd.tif`) and dead fuel moisture (`m1/m10/m100.tif`)
+  rasters is the hour containing the satellite ignition. Band *i* is *i* − 1
+  hours later.
+- Each band's UTC time is stored in the GeoTIFF; see it in QGIS or with
+  `gdalinfo`.
+- Both models simulate the same window, from satellite ignition to end.
+  - ELMFIRE reads band *i* during simulation hour *i*.
+  - FARSITE switches wind grids at their timestamps.
+- The ELMFIRE and FARSITE input steps refuse rasters that start at a
+  different hour. `python tools/checkHourlyInputs.py` checks every case.
+
 ### Live fuel moisture
 
 The Growing Season Index (Jolly, Nemani & Running 2005, *Global Change
@@ -392,7 +404,7 @@ parallel_api.py             subprocess, retry and HTTP helpers
 setup/                      fire selection and case folders (setup phase)
 pipeline/                   one module per per-case step, plus the batch runner and preflight
 validation/                 scoring (caseMetrics.py) and report pages
-tools/                      monitorBatch.py (live status), debugBandCounts.py
+tools/                      monitorBatch.py (live status), checkHourlyInputs.py (time alignment)
 docs/                       FARSITE input file reference
 environment.yml             conda environment
 ```

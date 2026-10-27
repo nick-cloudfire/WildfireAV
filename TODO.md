@@ -36,13 +36,20 @@ Effort: S = hours, M = a day or two.
       Prototype on 9 cases: herb 30–245 %, woody 60–197 % (most western summer fires fully cured: 30/60).
       Done with NFDRS4 defaults (annual herb, woody min 60); both configurable (GSI_* in config).
 
-- [ ] **Time alignment of hourly inputs (S, changes results).** For a fire igniting at 18:31 UTC
+- [x] **Time alignment of hourly inputs (S, changes results).** For a fire igniting at 18:31 UTC
       (case 00004), band 1 of ws/wd.tif is 17:00 in HRRR modes (WindNinja window padded by 1 h,
       18:00 in wxsFile mode) and band 1 of m1/m10/m100.tif is 19:00 (Nelson writes from hour
       `> preconditioningHours`, i.e. one after).  ELMFIRE uses band 1 of both at t = 0 (18:31);
       FARSITE labels ws band 1 as 18:00.  FARSITE also runs floor(start) -> floor(end + 1 h) while
       ELMFIRE runs start -> end.  Proposed: stack winds from floor(start), Nelson `>=`, FARSITE
-      start/end = ELMFIRE's, band times written into the GeoTIFFs.
+      start/end = ELMFIRE's, band times written into the GeoTIFFs.  Done (Nelson fix in
+      Nelson-Dead-Fuel-Moisture); steps refuse misaligned rasters; tools/checkHourlyInputs.py.
+
+- [ ] **ERA5 drizzle saturates fine dead fuels (S/M, investigate).** Case 00004: 0.1-0.3 mm/h ERA5
+      precipitation at the ignition hour puts Nelson 1-h moisture at 60 % (the cap), so ELMFIRE's
+      fire never establishes (Jaccard 0.258 -> 0 once the inputs were time-aligned).  ERA5 is known
+      for persistent light drizzle; consider a precipitation threshold (e.g. ignore < 0.5 mm/h) or
+      another precipitation source before Nelson.
 
 ## HPC / laptop portability
 

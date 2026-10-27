@@ -45,7 +45,7 @@ from rasterio.warp import transform_bounds
 from rasterio.windows import Window, from_bounds
 
 import pipelineConfig as cfg
-from common import fmt_duration, for_each_case, progress, require, skipped
+from common import fmt_duration, for_each_case, progress, read_wxs, require, skipped
 from parallel_api import retry_call
 
 HRRR_BASE_URL   = cfg.HRRR_BASE_URL
@@ -254,7 +254,7 @@ def _download_case(case_dir: Path):
     wxs, landscape = inputs / cfg.WXS_FILE_NAME, case_dir / runWindninja.LANDSCAPE
     require(landscape, hint="run the landfire step first")
     require(wxs, hint="run the weather step first")
-    hours = runWindninja.hourly_window(case_dir, runWindninja.read_wxs(wxs)).index
+    hours = runWindninja.hourly_window(case_dir, read_wxs(wxs)).index
     download_hrrr(landscape, hours[0], hours[-1], hrrr_dir)
     (hrrr_dir / COMPLETE_MARKER).write_text(f"{hours[0]} {hours[-1]}\n")
 
