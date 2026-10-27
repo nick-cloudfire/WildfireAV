@@ -43,6 +43,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE.parent), str(_HERE)]
 
+import hrrr_grid
 import pipelineConfig as cfg
 from case_metadata import case_dirs
 from common import fmt_duration
@@ -62,7 +63,7 @@ def is_done(case_dir: Path) -> bool:
 
 
 def discover(case_root: Path, specific: list[str] | None, skip_done: bool, test: bool = False) -> list[Path]:
-    folders = case_dirs(case_root, specific)
+    folders = hrrr_grid.drop_uncovered(case_dirs(case_root, specific))
     if test:
         folders = folders[:cfg.TEST_RUN_CASES]
         print(f"Test run: the first {len(folders)} case(s) (TEST_RUN_CASES = {cfg.TEST_RUN_CASES}): "

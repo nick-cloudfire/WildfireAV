@@ -68,6 +68,9 @@ folders (`FirePairs/00001/`, …). The settings named below are in
      covered area, so fires with sparse detections can still reach 90 %.
 4. **Filter.** Fires burning less than `MIN_HOURS_DURATION` (12 h) by
    satellite are dropped.
+   - With HRRR winds (the default), fires outside the HRRR CONUS grid
+     (Alaska, Hawaii, Puerto Rico) are dropped too. The same check
+     (`hrrr_grid.py`) also skips such fires in existing case folders.
 
 Satellite timing is used instead of the reported discovery time. The
 reported time is often hours or days away from the main spread, which would
@@ -166,8 +169,8 @@ Read the scores with these in mind:
   with 100 % foliar moisture.
 - **Live fuel moisture is one value per fire.** The GSI has no terrain or fuel
   type input.
-- **Fires are U.S. only,** because the inputs depend on LANDFIRE, HRRR and
-  MTBS.
+- **Fires are in the lower 48 states** with HRRR winds (the default). With
+  `WINDNINJA_MODE = "wxsFile"` (ERA5 point winds), Alaska and Hawaii work too.
 
 ---
 
@@ -328,7 +331,8 @@ In `FIRE_ROOT` (default `../FirePairs`):
 | File | Contents |
 |---|---|
 | `validation_report.pdf` | Cover (best/worst cases), scores vs. wind speed, fire size and duration, area bias per case, score histograms, then one page per case |
-| `validation_metrics.csv` | One row per case: observed and simulated areas, Jaccard, Sørensen, κ, area ratio, mean wind |
+| `validation_metrics.csv` | One row per case: fire name and year, observed and simulated areas, Jaccard, Sørensen, κ, area ratio, mean wind |
+| `validation_ignitions.gpkg` | The same table as points at each fire's reported ignition location (EPSG:4326, layer `ignitions`), to map the scores in QGIS / ArcGIS |
 | `fire_pairs_summary_with_satellite.csv` | Every case with its ignition, satellite start/end and fire-out times |
 | `run_summary_<time>.csv` | Per-case state, error and step timings of each batch run |
 | `hrrr_cache/` | HRRR hours shared between cases (safe to delete) |
@@ -403,6 +407,7 @@ and quotes the error.
 runWildfireAV               entry point: setup / run / pdf
 pipelineConfig.py           every setting, with comments
 satellite.py                satellite coverage curve (fire start and end times)
+hrrr_grid.py                which fires the HRRR CONUS winds cover
 case_metadata.py            per-case case_metadata.json
 cleanPipelineOutputs.py     delete outputs from a step onwards
 parallel_api.py             subprocess, retry and HTTP helpers

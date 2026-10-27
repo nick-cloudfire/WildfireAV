@@ -4,8 +4,9 @@ Validation report: every case's simulated burn area compared with the observed
 MTBS perimeter, for each fire model (ELMFIRE, FARSITE).
 
 Writes to FIRE_ROOT (and copies to REPORT_COPY_DIR, if set):
-    validation_report.pdf   cover, four summary pages, one page per case
-    validation_metrics.csv  one row per evaluated case (areas, scores, wind)
+    validation_report.pdf     cover, four summary pages, one page per case
+    validation_metrics.csv    one row per evaluated case (areas, scores, wind)
+    validation_ignitions.gpkg the same table as ignition points (EPSG:4326), for GIS
 
     python validation/getValidationPDF.py                 # all cases
     python validation/getValidationPDF.py --cases 12 47   # only these -> validation_00012_00047.pdf
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -29,20 +31,22 @@ sys.path[:0] = [str(_HERE.parent), str(_HERE)]
 import matplotlib
 
 matplotlib.use("Agg")
+import geopandas as gpd
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
+import hrrr_grid
 import pipelineConfig as cfg
 from case_metadata import case_dirs
-from caseMetrics import MODELS, Case, evaluate_case
+from caseMetrics import MODELS, SCORE_COLUMNS, Case, evaluate_case
 from casePage import case_page, error_page
+from satellite import AREA_CRS
 from summaryPages import cover_page, summary_pages
 
 log = logging.getLogger("validation")
 
 OUT_PDF = cfg.FIRE_ROOT / "validation_report.pdf"
-OUT_CSV = cfg.FIRE_ROOT / "validation_metrics.csv"
 NOT_IGNITED_JACCARD = 0.01   # best Jaccard of all models below this: the simulation did not take off
 
 matplotlib.rcParams.update({"pdf.fonttype": 42, "font.family": "DejaVu Sans Mono"})
@@ -51,6 +55,25 @@ matplotlib.rcParams.update({"pdf.fonttype": 42, "font.family": "DejaVu Sans Mono
 def _ignited(c: Case) -> bool:
     return max((c.score(mc, "jaccard") for mc in MODELS if c.model_toas.get(mc.label)), default=0.0) \
         >= NOT_IGNITED_JACCARD
+
+
+def _table(cases: list[Case]) -> gpd.GeoDataFrame:
+    """One row per case: identity, scores of every model, wind; geometry = reported ignition point."""
+    every_model = {f"{mc.key}_{k}": None for mc in MODELS for k in SCORE_COLUMNS}   # same columns every run
+    rows, points = [], []
+    for c in cases:
+        rows.append({"case": c.case_id, "fire_name": c.fire_name, "fire_year": c.fire_year,
+                     "ignited": _ignited(c), "simulated_h": c.duration_h, "observed_m2": c.observed_m2,
+                     **every_model, **{k: v for k, v in c.metrics.items() if k != "case"}})
+        points.append(c.ignition.geometry.iloc[0] if not c.ignition.empty else None)
+    return gpd.GeoDataFrame(rows, geometry=points, crs=AREA_CRS).to_crs(4326)   # Case geometry is AREA_CRS
+
+
+def _write_gpkg(gdf: gpd.GeoDataFrame, path: Path) -> None:
+    tmp = path.with_name(f".{path.stem}.partial.gpkg")   # never leave a half-written file
+    tmp.unlink(missing_ok=True)
+    gdf[gdf.geometry.notna()].to_file(tmp, layer="ignitions", driver="GPKG")
+    os.replace(tmp, path)
 
 
 def _evaluate(folder: Path) -> Case | Exception:
@@ -68,14 +91,17 @@ def main(cases: list[str] | None = None, out_pdf: Path | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("pyproj").setLevel(logging.CRITICAL)
     logging.getLogger("fontTools").setLevel(logging.WARNING)
-    folders = case_dirs(cfg.FIRE_ROOT, cases)
+    folders = hrrr_grid.drop_uncovered(case_dirs(cfg.FIRE_ROOT, cases))
     if not folders:
         raise RuntimeError(f"No cases found under {cfg.FIRE_ROOT}")
     single = len(folders) == 1
     if out_pdf is None:
         out_pdf = OUT_PDF if cases is None else OUT_PDF.with_name(f"validation_{'_'.join(f.name for f in folders)}.pdf")
-    out_csv = OUT_CSV if out_pdf == OUT_PDF else out_pdf.with_name(
-        out_pdf.stem.replace("validation_report", "validation_metrics") + ".csv")
+    stem = out_pdf.stem
+    out_csv = out_pdf.with_name(stem.replace("validation_report", "validation_metrics") + ".csv")
+    out_gpkg = out_pdf.with_name(stem.replace("validation_report", "validation_ignitions") + ".gpkg")
+    if out_csv.name == out_pdf.with_suffix(".csv").name:            # per-case reports: validation_<ids>
+        out_csv, out_gpkg = out_pdf.with_suffix(".csv"), out_pdf.with_suffix(".gpkg")
 
     log.info("Evaluating %d case(s) …", len(folders))
     with ThreadPoolExecutor(max_workers=min(cfg.MAX_PARALLEL_CASES, len(folders))) as pool:
@@ -102,9 +128,11 @@ def main(cases: list[str] | None = None, out_pdf: Path | None = None) -> None:
 
     written = [out_pdf]
     if evaluated and not single:
-        pd.DataFrame([c.metrics for c in evaluated]).to_csv(out_csv, index=False)
-        log.info("Wrote %s", out_csv)
-        written.append(out_csv)
+        table = _table(evaluated)
+        pd.DataFrame(table.drop(columns="geometry")).to_csv(out_csv, index=False)
+        _write_gpkg(table, out_gpkg)
+        log.info("Wrote %s and %s", out_csv.name, out_gpkg.name)
+        written += [out_csv, out_gpkg]
 
     if cfg.REPORT_COPY_DIR:
         dest = Path(cfg.REPORT_COPY_DIR)

@@ -126,6 +126,9 @@ def toa_crs(ds: rasterio.DatasetReader, fallback):
     return ds.crs
 
 
+SCORE_COLUMNS = ("observed_m2", "simulated_m2", "simulated_acres", "jaccard", "sorensen", "kappa", "ratio_of_areas")
+
+
 def similarity(obs: np.ndarray, sim: np.ndarray, cell_m2: float, prefix: str) -> dict[str, float]:
     """Jaccard, Sorensen, kappa and areas of two boolean burn masks on the same grid."""
     tp = float(np.sum(obs & sim))

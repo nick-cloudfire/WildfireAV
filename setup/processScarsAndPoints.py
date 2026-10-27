@@ -9,6 +9,7 @@ Algorithm
 4. Inner-join on normalised name.
 5. Filter by date proximity (|point_discovery - perim_ignition| <= DAY_TOLERANCE).
 6. Spatial filter: point must lie within the matched polygon.
+7. Drop fires outside the HRRR CONUS wind domain (Alaska, Hawaii, ...; see hrrr_grid.py).
 
 Outputs (written to the current working directory)
 --------------------------------------------------
@@ -22,6 +23,7 @@ import geopandas as gpd
 import pandas as pd
 import shapely
 
+import hrrr_grid
 import pipelineConfig
 
 
@@ -174,6 +176,16 @@ def main() -> None:
     matched_perim_idxs = merged_spatial["perim_idx"].astype(int).unique()
     perims_matched = perims_df.loc[matched_perim_idxs].copy()
     print(f"Unique matched perimeters: {len(perims_matched)}")
+
+    # ------------------------------------------------------------------
+    # 5. HRRR wind coverage (only in the HRRR wind modes)
+    # ------------------------------------------------------------------
+    if hrrr_grid.uses_hrrr():
+        bounds = gpd.GeoSeries(perims_matched["geom_perim"], crs=perims.crs).to_crs(4326).bounds
+        covered = [hrrr_grid.covers(b) for b in bounds.itertuples(index=False)]
+        n_out = len(covered) - sum(covered)
+        perims_matched = perims_matched[covered]
+        print(f"Perimeters inside the HRRR CONUS domain: {len(perims_matched)} ({n_out} outside, dropped)")
 
     output_perims_file.parent.mkdir(parents=True, exist_ok=True)
     perims_matched.to_file(output_perims_file, index=False)
