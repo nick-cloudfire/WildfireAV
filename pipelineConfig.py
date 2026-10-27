@@ -318,7 +318,8 @@ _KNOWN = {k for k in globals() if k.isupper()} | set(_DERIVED_PATHS)
 
 try:
     import pipelineConfig_local as _local
-    LOCAL_OVERRIDES = {k: v for k, v in vars(_local).items() if k.isupper()}
+    LOCAL_OVERRIDES = {k: v for k, v in vars(_local).items()
+                       if k.isupper() and not k.startswith("_")}   # _NAMES: helpers of the local file
 except ImportError:
     LOCAL_OVERRIDES = {}
 UNKNOWN_LOCAL_KEYS = sorted(set(LOCAL_OVERRIDES) - _KNOWN)   # stale/typo'd keys (reported by preflight)
