@@ -106,9 +106,11 @@ def _farsite(exe: Path) -> tuple[str, str]:
     if any(e in low for e in _WINE_ERRORS):
         first = next(l for l in out.splitlines() if any(e in l.lower() for e in _WINE_ERRORS))
         hint = ""
-        if "bad exe format" in low and any(p.lower().endswith((".com", ".exe", ".bat")) for p in exe.parts[:-1]):
-            hint = (" - a folder in its path ends in .com/.exe/.bat, which Wine mistakes for a program; "
-                    "point FARSITE_FB_DIR at a path without it (e.g. via /home)")
+        real = exe.resolve()
+        if "bad exe format" in low and any(p.lower().endswith((".com", ".exe", ".bat")) for p in real.parts[:-1]):
+            hint = (f" - its real path {real.parent} has a folder ending in .com/.exe/.bat, which Wine "
+                    "mistakes for a program; copy the FARSITE folder somewhere whose real path has none "
+                    "(e.g. scratch) and point FARSITE_FB_DIR there")
         return FAIL, f"wine64 can't start {exe}: {first.strip()[:120]}{hint}"
     if rc is None:
         return WARN, f"{exe} started but {out} (first Wine run creating its prefix?)"
