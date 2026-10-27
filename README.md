@@ -387,11 +387,6 @@ and quotes the error.
   points at that environment's `share/proj`. Preflight checks this.
 - **WindNinja "Failed to connect to ninjastorm.firelab.org"** is its version
   check and is harmless.
-- **FARSITE: "193: Bad EXE format"** although the `.exe` is fine: a folder in
-  its real path (`readlink -f`) ends in `.com`, e.g. a cluster mount like
-  `/net/fs001.example.com/home/…`, and Wine takes it for a program. Copy the
-  FARSITE folder to a location without one (e.g. scratch) and set
-  `FARSITE_FB_DIR` there.
 - **FARSITE fails:** re-run it by hand to see Wine's messages:
   `cd <case>/farsite && wine64 ~/farsite/bin/TestFARSITE.exe farsite.txt`.
   Input format: [docs/farsite_input_reference.md](docs/farsite_input_reference.md).

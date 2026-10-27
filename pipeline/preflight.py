@@ -32,6 +32,7 @@ sys.path[:0] = [str(_HERE.parent), str(_HERE)]
 import pipelineConfig as cfg
 from case_metadata import METADATA_FILENAME, case_dirs
 from downloadHrrr import COMPLETE_MARKER
+from runFarsiteCase import wine_env
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 
@@ -100,18 +101,11 @@ _WINE_ERRORS = ("could not load", "cannot find", "bad exe format", "not a valid 
 
 def _farsite(exe: Path) -> tuple[str, str]:
     """Start the FARSITE exe under Wine with no arguments (prints usage and exits)."""
-    rc, out = _launch(["wine64", str(exe)], 120, cwd=str(exe.parent),
-                      env={**os.environ, "WINEDEBUG": "-all", "PWD": str(exe.parent)})   # see runFarsiteCase
+    rc, out = _launch(["wine64", str(exe)], 120, cwd=str(exe.parent), env=wine_env(exe.parent))
     low = out.lower()
     if any(e in low for e in _WINE_ERRORS):
         first = next(l for l in out.splitlines() if any(e in l.lower() for e in _WINE_ERRORS))
-        hint = ""
-        real = exe.resolve()
-        if "bad exe format" in low and any(p.lower().endswith((".com", ".exe", ".bat")) for p in real.parts[:-1]):
-            hint = (f" - its real path {real.parent} has a folder ending in .com/.exe/.bat, which Wine "
-                    "mistakes for a program; copy the FARSITE folder somewhere whose real path has none "
-                    "(e.g. scratch) and point FARSITE_FB_DIR there")
-        return FAIL, f"wine64 can't start {exe}: {first.strip()[:120]}{hint}"
+        return FAIL, f"wine64 can't start {exe}: {first.strip()[:120]}"
     if rc is None:
         return WARN, f"{exe} started but {out} (first Wine run creating its prefix?)"
     return OK, f"{exe} (starts under wine64)"

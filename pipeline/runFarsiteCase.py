@@ -38,6 +38,19 @@ FARSITE_EXE  = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
 
 ARRIVAL_TIME_TIF = "farsite_Arrival Time.tif"   # completion sentinel
 
+# Linux geospatial settings (set by conda for the env's GDAL/PROJ) that must not
+# reach FARSITE: Wine passes the environment on, and FARSITE's own Windows GDAL
+# and PROJ (gdal-data/, proj9/ next to the exe) would read Linux files instead.
+_NOT_FOR_WINDOWS = ("GDAL_", "CPL_", "OGR_", "PROJ_", "GEOTIFF_")
+
+
+def wine_env(cwd: Path) -> dict[str, str]:
+    """Environment for running FARSITE under Wine in *cwd*."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_NOT_FOR_WINDOWS)}
+    # PWD: Wine takes its working directory from PWD when it names the same folder,
+    # else from the fully resolved path.
+    return {**env, "WINEDEBUG": "-all", "PWD": str(cwd)}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -61,10 +74,6 @@ def run_farsite(case_dir: Path):
         )
 
     # ---- run ------------------------------------------------------------
-    # PWD: Wine takes its working directory from PWD when it names the same folder, else from
-    # the fully resolved path - which can contain a folder Windows mistakes for a program
-    # (e.g. a cluster mount like /net/fs001.example.com/), giving "Bad EXE format".
-    wine_env = {**os.environ, "WINEDEBUG": "-all", "PWD": str(farsite_dir)}
     if not FARSITE_EXE.exists():
         raise FileNotFoundError(f"FARSITE binary not found: {FARSITE_EXE} (FARSITE_FB_DIR / FARSITE_EXE_NAME)")
     print(f"  Running: wine64 {FARSITE_EXE.name} farsite.txt")
@@ -72,7 +81,7 @@ def run_farsite(case_dir: Path):
     run_subprocess(
         ["wine64", str(FARSITE_EXE), "farsite.txt"],
         cwd=str(farsite_dir),
-        env=wine_env,
+        env=wine_env(farsite_dir),
         timeout=hours(cfg.FARSITE_TIMEOUT_H),
     )
 
