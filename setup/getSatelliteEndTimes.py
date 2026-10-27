@@ -214,7 +214,11 @@ def _process_case(
 
 def main() -> None:
     print("Loading satellite points …")
-    sat_gdf = gpd.read_file(SATELLITE_GPKG, layer=SATELLITE_LAYER).to_crs(satellite.AREA_CRS)
+    # Only detections that can belong to a case: from a month before the first fire year on
+    first_day = f"{pipelineConfig.MIN_FIRE_YEAR - 1}-12-01"
+    sat_gdf = gpd.read_file(SATELLITE_GPKG, layer=SATELLITE_LAYER,
+                            columns=[pipelineConfig.SAT_DATE_COL, pipelineConfig.SAT_TIME_COL],
+                            where=f"{pipelineConfig.SAT_DATE_COL} >= '{first_day}'").to_crs(satellite.AREA_CRS)
     sat_gdf["sat_datetime"] = satellite.detection_times(sat_gdf)
     sat_gdf = sat_gdf.dropna(subset=["sat_datetime"])
     sat_sindex = sat_gdf.sindex

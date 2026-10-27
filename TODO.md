@@ -50,7 +50,7 @@ Effort: S = hours, M = a day or two.
 - [x] **Validation PDF memory (M).** Keeps every case's float64 TOA raster in memory until the end
       — OOM risk with hundreds of cases. Keep area curves only, render case pages as they finish,
       use float32. Re-enable metrics CSV export (`getValidationPDF.py:1564`).
-- [ ] **Setup reads national datasets in full (M).** Satellite gpkg, MTBS, NIFC FOD: use pyogrio
+- [x] **Setup reads national datasets in full (M).** Satellite gpkg, MTBS, NIFC FOD: use pyogrio
       `where=`/`bbox=`/`columns=`. Drop the forced `set_crs(..., allow_override=True)`.
 - [ ] **HRRR shared cache (M).** Overlapping fires re-download the same hours.
 - [x] **`snap_to_valid_fuel` (S).** Re-reads a growing window one ring at a time (`common.py:150`);

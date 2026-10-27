@@ -21,7 +21,7 @@ import re
 
 import geopandas as gpd
 import pandas as pd
-from tqdm import tqdm
+import shapely
 
 import pipelineConfig
 
@@ -43,17 +43,6 @@ def _normalize_name(name: str) -> str | None:
         return None
     normed = re.sub(r"[^A-Z0-9]", "", name.upper())
     return None if normed == "UNNAMED" else normed
-
-
-def _point_inside_polygon(row) -> bool:
-    pt = row["geom_pt"]
-    poly = row["geom_perim"]
-    if pt is None or poly is None:
-        return False
-    try:
-        return pt.within(poly)
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +68,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 1. Load and filter perimeters
     # ------------------------------------------------------------------
-    perims = gpd.read_file(input_file)
+    # Read only what can match: the national files are large, the filters cut them ~100x.
+    perims = gpd.read_file(input_file, where=f"{acres_field} > {threshold}")
     for f in (acres_field, perim_name_field, perim_date_field):
         _check_field(f, perims)
 
@@ -108,7 +98,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 2. Load and filter ignition points
     # ------------------------------------------------------------------
-    points = gpd.read_file(points_file)
+    points = gpd.read_file(points_file, where=f"{point_disc_field} >= '{min_year}-01-01' "
+                                              f"AND {point_disc_field} < '{max_year + 1}-01-01'")
     for f in (point_name_field, point_disc_field, point_out_field):
         _check_field(f, points)
 
@@ -166,9 +157,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4. Spatial filter: point must lie inside matched polygon
     # ------------------------------------------------------------------
-    tqdm.pandas(desc="Spatial filter", unit="pt")
-    merged_time["inside"] = merged_time.progress_apply(_point_inside_polygon, axis=1)
-    merged_spatial = merged_time[merged_time["inside"]].copy()
+    inside = shapely.within(merged_time["geom_pt"].to_numpy(), merged_time["geom_perim"].to_numpy())
+    merged_spatial = merged_time[inside].copy()
 
     matched_pt_idxs = merged_spatial["pt_idx"].unique()
     points_matched = points_df.loc[matched_pt_idxs].copy()
