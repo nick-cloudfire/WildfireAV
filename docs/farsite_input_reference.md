@@ -1,19 +1,19 @@
-# FARSITE Linux Binary — Input File Reference
+# FARSITE Input File Reference
 
-This document describes the input switches recognized by the compiled Linux
-FARSITE binary (`TestFARSITE`) built from `/home/nick/farsite/src/`.
+The files `pipeline/prepareFarsite.py` writes for the command-line FARSITE
+(`TestFARSITE.exe`, run under Wine), and the rules FARSITE enforces on them.
+Notes on validation rules come from reading the FARSITE source.
 
-> **Important — WindNinja integration is NOT compiled in.**
-> `Far_WN.cpp` is excluded from the Makefile `SOURCES` list, so
-> `GRIDDED_WINDS_GENERATE: Yes` is parsed but silently ignored.
-> Use `FARSITE_ATM_FILE` (see below) to supply pre-generated wind grids.
+The pipeline supplies winds as pre-computed WindNinja grids through
+`FARSITE_ATM_FILE`; FARSITE's own WindNinja coupling (`GRIDDED_WINDS_*`) is
+not used.
 
 ---
 
 ## Command line
 
 ```
-TestFARSITE <command-file>
+wine64 TestFARSITE.exe <command-file>
 ```
 
 The command file contains a single line:
@@ -131,7 +131,7 @@ ENGLISH
 - First line: `ENGLISH` (mph) or `METRIC` (kph at 10 m → converted to 20 ft internally)
 - One entry per timestep; timesteps need not be uniform
 - `HHMM` is the integer time (e.g., `100` = 01:00, `1400` = 14:00)
-- Paths are relative to FARSITE's CWD (not to the ATM file location, on Linux)
+- Paths are relative to FARSITE's working directory, not to the ATM file
 - **Coverage**: each grid must cover the full LCP extent
   (`west ≤ LCP_west`, `east ≥ LCP_east`, `south ≤ LCP_south`, `north ≥ LCP_north`)
 - **Timing**: the first entry's timestamp must equal or precede `FARSITE_START_TIME`
@@ -153,29 +153,12 @@ NODATA_value -9999
 
 Followed immediately by space-separated float data rows (row 0 = north edge).
 
-### Switches parsed but not functional in this build
-
-| Switch | Status |
-|---|---|
-| `GRIDDED_WINDS_GENERATE: Yes/No` | Parsed; no WindNinja library → ignored |
-| `GRIDDED_WINDS_RESOLUTION: <m>` | Parsed but unused |
-| `GRIDDED_WINDS_HEIGHT: <ft>` | Parsed but unused |
-
 ---
 
 ## Output files
 
-With output type `1` (ASCII), FARSITE writes the following `.asc` files to the
-specified output base path:
-
-| File | Description |
-|---|---|
-| `farsite_ArrivalTime.asc` | Arrival time (minutes from simulation start) |
-| `farsite_FirelineIntensity.asc` | Fireline intensity (kW/m) |
-| `farsite_FlameLength.asc` | Flame length (m) |
-| `farsite_SpreadRate.asc` | Rate of spread (m/min) |
-| `farsite_HeatPerUnitArea.asc` | Heat per unit area (kJ/m²) |
-| `farsite_ReactiveIntensity.asc` | Reactive intensity (kW/m²) |
-| `farsite_CrownFireActivity.asc` | Crown fire flag (0/1/2) |
-
-The pipeline keeps only `farsite_ArrivalTime.asc` and deletes the rest.
+With output type `2` (GeoTIFF, used by the pipeline) FARSITE writes
+`farsite_<Layer>.tif` files to the output base path, e.g.
+`farsite_Arrival Time.tif` (arrival time, minutes from simulation start),
+fireline intensity, flame length, spread rate, heat per unit area, reactive
+intensity and crown fire activity.  The pipeline keeps only the arrival time.

@@ -1,0 +1,21 @@
+# Conda environment for the pipeline:
+#   conda env create -f environment.yml && conda activate wildfireav
+# ELMFIRE, FARSITE (+ Wine) and the Nelson model are installed separately (see README).
+name: wildfireav
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - geopandas>=1.0
+  - shapely>=2.0
+  - pyogrio
+  - fiona
+  - pyproj
+  - rasterio
+  - gdal            # gdal_translate, ogr2ogr, gdalbuildvrt, gdalsrsinfo
+  - libgdal-grib    # GDAL GRIB driver, reads HRRR
+  - matplotlib
+  - requests
+  - windninja       # WindNinja_cli
