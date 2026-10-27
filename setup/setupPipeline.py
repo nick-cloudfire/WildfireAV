@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Local (login-node) pipeline setup driver.
-
-Runs once before copying case folders to the HPC scratch directory.
-Produces numbered case folders and the satellite-enriched summary CSV
-that the HPC pipeline (runPipelineParallel.py) expects.
+Setup: turn the national datasets into numbered case folders under FIRE_ROOT,
+each with its burn perimeter, ignition point, satellite detections and
+case_metadata.json (fire name, ignition and end times) for the per-case pipeline.
 
 Steps
 -----

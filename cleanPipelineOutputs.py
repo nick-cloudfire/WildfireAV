@@ -1,40 +1,19 @@
 #!/usr/bin/env python3
 """
-Delete generated pipeline files so cases can be cleanly re-run.
+Delete what the per-case pipeline produced, from one step onwards, so cases
+re-run cleanly.  Step names are those of the pipeline
+(``python pipeline/runPipelineParallel.py --list-steps``).
 
-By default all outputs AFTER prefetchLandfire are removed (LANDFIRE.tif is kept).
-Use --from-step to remove only a specific step and everything after it.
+By default everything after the LANDFIRE download is removed (LANDFIRE.tif,
+case_metadata.json and the fire geometry are kept).  ws.tif / wd.tif are kept
+unless --include-wind-tifs is given: WindNinja is the slowest step.
 
-Steps (in pipeline order)
---------------------------
-  landfire_bands   inputs/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif
-  phi_adj          inputs/phi.tif  inputs/adj.tif
-  weather          inputs/weather.wxs
-  windninja        inputs/windninja/  [inputs/ws.tif  inputs/wd.tif  if --include-wind-tifs]
-  nelson           inputs/m1.tif  inputs/m10.tif  inputs/m100.tif
-  barrier          inputs/barrier.tif
-  elmfire_inputs   <case>/*.data
-  elmfire_outputs  outputs/  scratch/
+    python cleanPipelineOutputs.py --dry-run                       # show what would go
+    python cleanPipelineOutputs.py                                 # everything after LANDFIRE.tif
+    python cleanPipelineOutputs.py --from-step run_elmfire         # only the fire model outputs
+    python cleanPipelineOutputs.py --from-step windninja --include-wind-tifs --cases 13
 
-pipeline.log and status.json are always removed when any step is cleaned.
-
-By default ws.tif and wd.tif are NOT deleted when cleaning the windninja step,
-because regenerating them requires re-running all WindNinja hourly steps which
-is slow.  Pass --include-wind-tifs to also remove them.
-
-Usage
------
-  # Full reset (everything after LANDFIRE):
-  python cleanPipelineOutputs.py
-
-  # Reset only from WindNinja onwards:
-  python cleanPipelineOutputs.py --from-step windninja
-
-  # Dry run — show what would be deleted without deleting:
-  python cleanPipelineOutputs.py --dry-run
-
-  # Specific cases only:
-  python cleanPipelineOutputs.py --cases 00001 00003
+The shared HRRR cache (FIRE_ROOT/hrrr_cache) is never touched; delete it by hand.
 """
 
 from __future__ import annotations
@@ -47,186 +26,72 @@ from pathlib import Path
 import pipelineConfig as cfg
 from case_metadata import case_dirs
 
-# ---------------------------------------------------------------------------
-# Step definitions (ordered)
-# ---------------------------------------------------------------------------
-
 INPUTS = cfg.INPUTS_SUBDIR_NAME
+WIND_TIFS = [f"{INPUTS}/{cfg.WS_TIF_NAME}", f"{INPUTS}/{cfg.WD_TIF_NAME}"]
 
-# Each step: (name, always-delete paths, always-delete globs, wind-tif paths)
-# wind-tif paths are only deleted when --include-wind-tifs is passed.
-# Paths that are directories will be removed with shutil.rmtree.
-_STEPS: list[tuple[str, list[str], list[str], list[str]]] = [
-    (
-        "landfire_bands",
-        [f"{INPUTS}/{name}.tif" for name in cfg.LANDFIRE_BAND_FILE_NAMES],
-        [],
-        [],
-    ),
-    (
-        "phi_adj",
-        [f"{INPUTS}/{cfg.PHI_FILE_NAME}", f"{INPUTS}/{cfg.ADJ_FILE_NAME}"],
-        [],
-        [],
-    ),
-    (
-        "weather",
-        [f"{INPUTS}/{cfg.WXS_FILE_NAME}"],
-        [],
-        [],
-    ),
-    (
-        "live_moisture",
-        [f"{INPUTS}/live_fuel_moisture.json"],
-        [],
-        [],
-    ),
-    (
-        "windninja",
-        [f"{INPUTS}/{cfg.WINDNINJA_SUBDIR}"],  # directory
-        [],
-        [f"{INPUTS}/{cfg.WS_TIF_NAME}", f"{INPUTS}/{cfg.WD_TIF_NAME}"],
-    ),
-    (
-        "nelson",
-        [f"{INPUTS}/{name}.tif" for name in cfg.FMC_FILE_NAMES],
-        [],
-        [],
-    ),
-    (
-        "barrier",
-        [f"{INPUTS}/{cfg.BARRIER_FILE_NAME}"],
-        [],
-        [],
-    ),
-    (
-        "elmfire_inputs",
-        [],
-        ["*.data"],  # glob in case root
-        [],
-    ),
-    (
-        "elmfire_outputs",
-        [cfg.ELMFIRE_OUTPUTS_SUBDIR, cfg.ELMFIRE_SCRATCH_SUBDIR],
-        [],
-        [],
-    ),
-]
-
-STEP_NAMES = [name for name, _, _, _ in _STEPS]
+# Pipeline step -> what it writes, relative to the case folder (globs allowed), in pipeline order.
+OUTPUTS: dict[str, list[str]] = {
+    "landfire":        ["LANDFIRE.tif", "LANDFIRE.tfw"],
+    "split_bands":     [f"{INPUTS}/{name}.tif" for name in cfg.LANDFIRE_BAND_FILE_NAMES],
+    "adj_phi":         [f"{INPUTS}/{cfg.ADJ_FILE_NAME}", f"{INPUTS}/{cfg.PHI_FILE_NAME}"],
+    "weather":         [f"{INPUTS}/{cfg.WXS_FILE_NAME}"],
+    "live_moisture":   [f"{INPUTS}/live_fuel_moisture.json"],
+    "hrrr":            [f"{INPUTS}/{cfg.WINDNINJA_SUBDIR}/{cfg.HRRR_LOCAL_SUBDIR}"],
+    "windninja":       [f"{INPUTS}/{cfg.WINDNINJA_SUBDIR}"],
+    "nelson":          [f"{INPUTS}/{name}.tif" for name in cfg.FMC_FILE_NAMES],
+    "barrier":         [f"{INPUTS}/{cfg.BARRIER_FILE_NAME}", f"{INPUTS}/{cfg.BARRIER_ROADS_CLIP_NAME}",
+                        f"{INPUTS}/{cfg.BARRIER_WATER_CLIP_NAME}", f"{INPUTS}/{cfg.BARRIER_BACKUP_CLIP_NAME}"],
+    "elmfire_inputs":  ["*.data"],
+    "prepare_farsite": ["farsite"],
+    "run_elmfire":     [cfg.ELMFIRE_OUTPUTS_SUBDIR, cfg.ELMFIRE_SCRATCH_SUBDIR],
+    "run_farsite":     ["farsite/outputs"],
+}
+STEPS = list(OUTPUTS)
+DEFAULT_FROM = "split_bands"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _targets_for_case(case_dir: Path, steps: list[tuple], include_wind_tifs: bool) -> list[Path]:
-    """Return all paths (files + dirs) that should be deleted for this case."""
-    targets: list[Path] = []
-    for _, rel_paths, globs, wind_paths in steps:
-        for rel in rel_paths:
-            targets.append(case_dir / rel)
-        for pattern in globs:
-            targets.extend(case_dir.glob(pattern))
-        if include_wind_tifs:
-            for rel in wind_paths:
-                targets.append(case_dir / rel)
-    targets += [case_dir / "pipeline.log", case_dir / "status.json"]
-    return targets
+def targets(case_dir: Path, from_step: str = DEFAULT_FROM, include_wind_tifs: bool = False) -> list[Path]:
+    """Existing paths written by from_step and every later step, plus the case log/status."""
+    patterns = [p for step in STEPS[STEPS.index(from_step):] for p in OUTPUTS[step]]
+    patterns += ["pipeline.log", "status.json"] + (WIND_TIFS if include_wind_tifs else [])
+    return sorted({hit for p in patterns for hit in case_dir.glob(p)})
 
 
-def _delete(path: Path, dry_run: bool, verbose: bool = True) -> bool:
-    """Delete a file or directory. Returns True if something was removed."""
-    if not path.exists():
-        return False
-    if verbose:
-        print(f"  {'[DRY RUN] ' if dry_run else ''}delete  {path}{'/' if path.is_dir() else ''}")
+def delete(path: Path, dry_run: bool = False) -> None:
     if not dry_run:
-        shutil.rmtree(path) if path.is_dir() else path.unlink()
-    return True
+        shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def clean(folders: list[Path], from_step: str = DEFAULT_FROM, include_wind_tifs: bool = False,
+          dry_run: bool = False, verbose: bool = True) -> int:
+    """Delete the outputs of from_step onwards in every folder; returns the number of items."""
+    total = 0
+    for folder in folders:
+        found = targets(folder, from_step, include_wind_tifs)
+        for path in found:
+            if verbose:
+                print(f"  {'[dry run] ' if dry_run else ''}delete {path}{'/' if path.is_dir() else ''}")
+            delete(path, dry_run)
+        total += len(found)
+    return total
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Delete pipeline outputs so cases can be re-run.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--case-root",
-        default=str(cfg.FIRE_ROOT),
-        help="Root directory containing numbered case folders.",
-    )
-    parser.add_argument(
-        "--from-step",
-        metavar="STEP",
-        choices=STEP_NAMES,
-        default=STEP_NAMES[0],
-        help=(
-            "Delete this step and all later steps. "
-            f"Choices: {', '.join(STEP_NAMES)}"
-        ),
-    )
-    parser.add_argument(
-        "--cases",
-        nargs="+",
-        metavar="FOLDER",
-        help="Clean only these specific case folders (default: all).",
-    )
-    parser.add_argument(
-        "--include-wind-tifs",
-        action="store_true",
-        help="Also delete inputs/ws.tif and inputs/wd.tif when cleaning the windninja step.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print what would be deleted without actually deleting.",
-    )
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--case-root", default=str(cfg.FIRE_ROOT), help="folder with the numbered case folders")
+    p.add_argument("--from-step", choices=STEPS, default=DEFAULT_FROM, metavar="STEP",
+                   help=f"delete this step's outputs and every later step's ({', '.join(STEPS)})")
+    p.add_argument("--cases", nargs="+", metavar="ID", help="only these cases (leading zeros optional)")
+    p.add_argument("--include-wind-tifs", action="store_true", help="also delete inputs/ws.tif and wd.tif")
+    p.add_argument("--dry-run", action="store_true", help="only print what would be deleted")
+    args = p.parse_args()
 
-    case_root = Path(args.case_root)
-    if not case_root.is_dir():
-        print(f"ERROR: case root not found: {case_root}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.cases:
-        folders = [case_root / name for name in args.cases]
-    else:
-        folders = case_dirs(case_root)
-
+    folders = case_dirs(Path(args.case_root), args.cases)
     if not folders:
-        print("No case folders found.")
-        return
-
-    # Slice steps from the requested starting point onwards
-    from_idx     = STEP_NAMES.index(args.from_step)
-    active_steps = _STEPS[from_idx:]
-
-    wind_note = " (+ws.tif/wd.tif)" if args.include_wind_tifs else " (ws.tif/wd.tif kept)"
-    print(
-        f"{'DRY RUN — ' if args.dry_run else ''}"
-        f"Cleaning {len(folders)} case(s) from step '{args.from_step}' onwards{wind_note}\n"
-        f"Steps: {', '.join(s[0] for s in active_steps)}\n"
-    )
-
-    total_removed = 0
-    for folder in folders:
-        if not folder.is_dir():
-            print(f"  WARNING: {folder} not found, skipping.")
-            continue
-
-        targets  = _targets_for_case(folder, active_steps, args.include_wind_tifs)
-        removed  = sum(_delete(t, args.dry_run) for t in targets)
-        if removed:
-            total_removed += removed
-            print(f"  [{folder.name}]  {removed} item(s) removed")
-
-    action = "would remove" if args.dry_run else "removed"
-    print(f"\nDone — {action} {total_removed} item(s) across {len(folders)} case(s).")
+        sys.exit(f"No case folders found under {args.case_root}")
+    n = clean(folders, args.from_step, args.include_wind_tifs, args.dry_run)
+    print(f"\n{'Would remove' if args.dry_run else 'Removed'} {n} item(s) in {len(folders)} case(s).")
 
 
 if __name__ == "__main__":

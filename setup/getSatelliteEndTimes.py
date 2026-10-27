@@ -1,4 +1,3 @@
-# getSatelliteEndTimes.py
 """
 Step 3 of setupPipeline: compute SatelliteIgnitionTime and SatelliteEndTime
 for each fire case using satellite hotspot data.

@@ -31,6 +31,7 @@ sys.path[:0] = [str(_HERE.parent), str(_HERE)]
 
 import pipelineConfig as cfg
 from case_metadata import METADATA_FILENAME, case_dirs
+from downloadHrrr import COMPLETE_MARKER
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 
@@ -129,9 +130,11 @@ def _existing(path: Path) -> Path:
     return path
 
 
-def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> list[tuple[str, str, str]]:
+def checks(folders: list[Path] | None, workers: int, fresh: bool = False,
+           download_only: bool = False) -> list[tuple[str, str, str]]:
     """fresh=True: outputs will be cleaned first, so every case needs every download.
-    folders=None: checked before setup — no cases yet, so every download is needed."""
+    folders=None: checked before setup — no cases yet, so every download is needed.
+    download_only: only what the download steps need (internet, LFPS_EMAIL, disk)."""
     inputs = cfg.INPUTS_SUBDIR_NAME
     res: list[tuple[str, str, str]] = []
 
@@ -153,8 +156,7 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
                             ("ignition points", cfg.USFS_POINTS_RAW),
                             ("satellite points", cfg.SATELLITE_GPKG)):
             add(OK if Path(path).exists() else FAIL, f"data {label}", str(path))
-        need_lfps = need_wx = ["all"]
-        need_wn = ["all"]
+        need_lfps = need_wx = need_wn = need_hrrr = ["all"]
     else:
         no_meta = [f.name for f in folders if not (f / METADATA_FILENAME).exists()]
         add(FAIL if no_meta else OK, "case metadata",
@@ -166,6 +168,12 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
         need_wx = [f for f in folders if fresh or not (f / inputs / cfg.WXS_FILE_NAME).exists()
                    or (gsi and not (f / inputs / "live_fuel_moisture.json").exists())]
         need_wn = [f for f in folders if fresh or not (f / inputs / cfg.WS_TIF_NAME).exists()]
+        hrrr_done = Path(inputs, cfg.WINDNINJA_SUBDIR, cfg.HRRR_LOCAL_SUBDIR, COMPLETE_MARKER)
+        need_hrrr = [f for f in need_wn if fresh or not (f / hrrr_done).exists()]
+    if cfg.WINDNINJA_MODE != "hrrrLocal":
+        need_hrrr = []
+    if download_only:
+        need_wn = []
 
     # ---- credentials ----------------------------------------------------------
     if need_lfps:
@@ -174,7 +182,7 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
                                   "(export LFPS_EMAIL=you@example.com)")
 
     # ---- executables ------------------------------------------------------------
-    tools = ["gdal_translate", "ogr2ogr", "gdalsrsinfo", cfg.ELMFIRE_EXE, "wine64"]
+    tools = [] if download_only else ["gdal_translate", "ogr2ogr", "gdalsrsinfo", cfg.ELMFIRE_EXE, "wine64"]
     if need_wn:
         tools.append("gdalbuildvrt")
     for t in tools:
@@ -182,15 +190,16 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
         missing = _missing_libs(path) if path and t != "wine64" else []
         add(FAIL if not path or missing else OK, f"exe {Path(str(t)).name}",
             f"{path}: missing libraries {' '.join(missing)}" if missing else path or "not found on PATH")
-    farsite = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
-    if not farsite.exists():
-        add(FAIL, "FARSITE binary", f"{farsite} not found")
-    elif _which("wine64"):
-        level, detail = _farsite(farsite)
-        add(level, "FARSITE binary", detail)
-    nelson = Path(cfg.NELSON_EXE)
-    level, detail = _nelson(nelson) if nelson.exists() else (FAIL, f"{nelson} not found")
-    add(level, "Nelson model", detail)
+    if not download_only:
+        farsite = Path(cfg.FARSITE_FB_DIR) / cfg.FARSITE_EXE_NAME
+        if not farsite.exists():
+            add(FAIL, "FARSITE binary", f"{farsite} not found")
+        elif _which("wine64"):
+            level, detail = _farsite(farsite)
+            add(level, "FARSITE binary", detail)
+        nelson = Path(cfg.NELSON_EXE)
+        level, detail = _nelson(nelson) if nelson.exists() else (FAIL, f"{nelson} not found")
+        add(level, "Nelson model", detail)
     if need_wn:
         level, detail = _windninja()
         add(level, "WindNinja_cli", detail)
@@ -203,10 +212,19 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
                 level, detail = _proj_db(wn)
                 add(level, "PROJ database", detail)
 
+    if need_hrrr:
+        import rasterio
+        with rasterio.Env() as env:
+            grib = "GRIB" in env.drivers()
+        add(OK if grib else FAIL, "GDAL GRIB driver", "available" if grib else
+            "missing: HRRR files can't be read (conda install -c conda-forge libgdal-grib)")
+
     # ---- datasets -----------------------------------------------------------------
     for label, path, required in (("roads", cfg.ROADS_GPKG, True),
                                   ("waterways", cfg.WATER_GPKG, True),
                                   ("backup rivers", cfg.BACKUP_WATER_GPKG, False)):
+        if download_only:
+            break
         exists = Path(path).exists()
         add(OK if exists else (FAIL if required else WARN), f"data {label}", str(path))
 
@@ -216,8 +234,8 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
         urls.append(("LFPS API", cfg.LFPS_BASE_API, need_lfps))
     if need_wx:
         urls.append(("OpenMeteo", cfg.OPENMETEO_URL, need_wx))
-    if need_wn and cfg.WINDNINJA_MODE == "hrrrLocal":
-        urls.append(("HRRR archive", cfg.HRRR_BASE_URL + "/", need_wn))
+    if need_hrrr:
+        urls.append(("HRRR archive", cfg.HRRR_BASE_URL + "/", need_hrrr))
     with ThreadPoolExecutor(max_workers=4) as ex:
         for (label, url, need), (ok, why) in zip(urls, ex.map(lambda u: _reachable(u[1]), urls)):
             n = "all cases" if folders is None else f"{len(need)} case(s)"
@@ -235,9 +253,9 @@ def checks(folders: list[Path] | None, workers: int, fresh: bool = False) -> lis
     return res
 
 
-def run(folders: list[Path] | None, workers: int, fresh: bool = False) -> bool:
+def run(folders: list[Path] | None, workers: int, fresh: bool = False, download_only: bool = False) -> bool:
     """Print the checks; return False if any check failed."""
-    res = checks(folders, workers, fresh)
+    res = checks(folders, workers, fresh, download_only)
     print("PREFLIGHT")
     for level, name, detail in res:
         print(f"  [{level:>4}] {name:<22} {detail}")

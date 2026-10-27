@@ -1,4 +1,3 @@
-# pipelineConfig.py
 """
 Central configuration for the Elmfire validation pipeline.
 
@@ -99,6 +98,8 @@ _DERIVED_PATHS = {
     "FIRE_SUMMARY_SAT_CSV_PATH":  lambda: FIRE_ROOT / "fire_pairs_summary_with_satellite.csv",
     "MTBS_PERIMS_WITH_IGNITIONS": lambda: FIRE_ROOT / "perimeters_ignitions.gpkg",
     "USFS_POINTS_MATCHED":        lambda: FIRE_ROOT / "all_ignitions.gpkg",
+    # HRRR hours shared by all cases (WINDNINJA_MODE = "hrrrLocal"); safe to delete
+    "HRRR_CACHE_DIR":             lambda: FIRE_ROOT / "hrrr_cache",
     # Nelson dead-fuel model (built with `dotnet publish -c Release`)
     "NELSON_EXE":                 lambda: BASE_DATA / "nelson_csharp" / "bin" / "Release" / "net8.0" / "nelson_csharp",
 }
@@ -241,8 +242,6 @@ WATER_LAYER         = "lines"
 
 ROAD_CLASS_FIELD    = "highway"
 WATER_CLASS_FIELD   = "waterway"
-WRITE_TEMP_CLIPS    = True
-KEEP_TEMP_CLIPS     = True
 ALL_TOUCHED         = True
 
 BARRIER_BACKUP_WATER_WIDTH_M = 5.0   # default width for backup river features (m)
@@ -281,7 +280,6 @@ LFPS_POLL_SLEEP_S           = 10    # seconds between job-status polls
 LFPS_POLL_HEARTBEAT_S       = 1800  # log "still waiting" every N seconds (0 = disable)
 LFPS_JOB_TIMEOUT_H          = 0     # give up on one queued job after N hours (0 = poll forever)
 LFPS_MAX_ATTEMPTS           = 3     # submit → poll → download attempts per case
-LFPS_CONCURRENT_JOBS        = 60    # concurrent LFPS jobs in prefetchLandfire.py
 
 # =============================================================================
 # 13. NELSON DEAD-FUEL MODEL

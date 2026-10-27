@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Stack WindNinja's hourly ASCII grids into inputs/ws.tif (speed, mph) and
+inputs/wd.tif (direction, degrees), one band per hour in time order.
+
+WindNinja names its outputs ``*_MM-DD-YYYY_HHMM_<res>_vel.asc`` / ``..._ang.asc``
+(time in WINDNINJA_TIME_ZONE, UTC).  The stacks are padded or cropped to the
+LANDFIRE grid so ELMFIRE can read them alongside the fuels.
+"""
+
 import re
 import tempfile
 from pathlib import Path

@@ -10,11 +10,16 @@ Usage
   runWildfireAV --start pdf              # regenerate the validation pdf only
   runWildfireAV --start run --dry-run    # show what would run and each case's last status
 
+  HPC whose compute nodes have no internet:
+  runWildfireAV --start run --download-only   # login node: LANDFIRE, ERA5, HRRR only
+  runWildfireAV --start run --resume          # compute job: everything else, then pdf
+
 Options for the run phase
 -------------------------
   --workers N        cases at once (default MAX_PARALLEL_CASES)
   --cases ID ...     only these cases (e.g. 00001 3)
   --resume           (= --skip-done) skip cases with ELMFIRE output; nothing is cleaned
+  --download-only    only the steps that need internet; nothing is cleaned, no pdf
   --heartbeat MIN    minutes between progress heartbeats (default BATCH_HEARTBEAT_MIN)
   --no-preflight     skip the environment checks
 
@@ -63,12 +68,8 @@ PHASES = ["setup", "run", "pdf"]
 
 def _clean_outputs(folders: list[Path]) -> None:
     """Delete per-case simulation outputs (keeps LANDFIRE.tif and metadata)."""
-    import cleanPipelineOutputs as cleaner
-    steps = cleaner._STEPS[cleaner.STEP_NAMES.index("landfire_bands"):]
-    total = 0
-    for folder in folders:
-        targets = cleaner._targets_for_case(folder, steps, include_wind_tifs=True) + [folder / "farsite"]
-        total += sum(cleaner._delete(t, dry_run=False, verbose=False) for t in targets)
+    import cleanPipelineOutputs
+    total = cleanPipelineOutputs.clean(folders, include_wind_tifs=True, verbose=False)
     print(f"  Cleaned simulation outputs of {len(folders)} case(s) ({total} item(s) removed; "
           "LANDFIRE.tif kept).  Use --resume to keep outputs.")
 
@@ -95,7 +96,7 @@ def phase_run(args, clean: bool) -> int:
         return 0
     if clean:
         _clean_outputs(folders)
-    return runBatch.run_batch(folders, args.workers, args.heartbeat)
+    return runBatch.run_batch(folders, args.workers, args.heartbeat, args.download_only)
 
 
 def preflight_first(args) -> bool:
@@ -107,7 +108,8 @@ def preflight_first(args) -> bool:
     if args.start == "setup":
         return preflight.run(None, args.workers, fresh=True)
     folders = runBatch.discover(FIRE_ROOT, args.cases, args.skip_done)
-    return not folders or preflight.run(folders, args.workers, fresh=not args.skip_done)
+    return not folders or preflight.run(folders, args.workers, fresh=not (args.skip_done or args.download_only),
+                                        download_only=args.download_only)
 
 
 def phase_pdf() -> int:
@@ -136,6 +138,10 @@ def main() -> int:
     runBatch.add_run_args(p)
     args = p.parse_args()
     active = PHASES[PHASES.index(args.start):]
+    if args.download_only:
+        if args.start != "run":
+            p.error("--download-only goes with --start run")
+        active = ["run"]
 
     slurm = os.environ.get("SLURM_JOB_ID")
     print("=" * 72)
@@ -163,7 +169,7 @@ def main() -> int:
             if phase == "setup":
                 phase_rc = phase_setup()
             elif phase == "run":
-                phase_rc = phase_run(args, clean=(args.start == "run" and not args.skip_done))
+                phase_rc = phase_run(args, clean=not (args.skip_done or args.download_only))
             else:
                 phase_rc = phase_pdf()
         except Exception:

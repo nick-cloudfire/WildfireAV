@@ -1,4 +1,3 @@
-# parallel_api.py
 """
 Shared utilities for the Elmfire validation pipeline.
 
@@ -15,7 +14,6 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import sys
 import threading
 import time
 from typing import IO, Callable, Optional, TypeVar

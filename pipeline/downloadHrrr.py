@@ -16,6 +16,14 @@ which does not scale.  Instead we:
    own GCP downloader writes;
 3. zip the hours of each WindNinja run into ``PASTCAST-GCP-HRRR-CONUS-3-KM_*.zip``.
 
+The fetched (uncropped) messages of each hour are kept in HRRR_CACHE_DIR, so
+fires burning at the same time share downloads.
+
+As a pipeline step (before WindNinja, WINDNINJA_MODE = "hrrrLocal") it
+downloads the case's hours and marks them complete, so a login node with
+internet can fetch everything (``runWildfireAV --start run --download-only``)
+and compute nodes without internet run the rest.
+
 WindNinja identifies the model from that name and runs every hour in the zip
 (see firelab/windninja src/ninja/gcp_wx_init.cpp and cli.cpp), so the config
 only needs ``forecast_filename = <zip>`` and ``time_zone``.
@@ -23,6 +31,8 @@ only needs ``forecast_filename = <zip>`` and ``time_zone``.
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,7 +45,7 @@ from rasterio.warp import transform_bounds
 from rasterio.windows import Window, from_bounds
 
 import pipelineConfig as cfg
-from common import fmt_duration, progress
+from common import fmt_duration, for_each_case, progress, require, skipped
 from parallel_api import retry_call
 
 HRRR_BASE_URL   = cfg.HRRR_BASE_URL
@@ -49,6 +59,7 @@ THREADS         = cfg.HRRR_DOWNLOAD_THREADS
 RETRIES         = cfg.HRRR_DOWNLOAD_RETRIES
 TIMEOUT_S       = cfg.HRRR_DOWNLOAD_TIMEOUT_S
 ZIP_PREFIX      = "PASTCAST-GCP-HRRR-CONUS-3-KM"   # WindNinja identifies the model by this substring
+COMPLETE_MARKER = "DOWNLOAD_COMPLETE"              # written once every hour of a case is present
 
 
 # ---------------------------------------------------------------------------
@@ -135,28 +146,49 @@ def tif_name(ts: pd.Timestamp) -> str:
     return f"hrrr.{ts:%Y%m%d}t{ts:%H}z.wrfsfcf00.tif"   # name WindNinja looks up inside the zip
 
 
-def _fetch_hour(ts: pd.Timestamp, out_dir: Path, dem_crs, dem_bounds) -> bool:
-    """Fetch + crop one analysis hour.  False if the archive has no such hour."""
-    final = out_dir / tif_name(ts)
-    if final.exists():
-        return True
+def _part(path: Path) -> Path:
+    """Temporary name unique to this process and thread (cases share the cache)."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+
+
+def _cached_grib(ts: pd.Timestamp) -> Path | None:
+    """The hour's four CONUS messages from the cache, downloaded if needed (None: not in archive)."""
+    cached = Path(cfg.HRRR_CACHE_DIR) / f"hrrr.{ts:%Y%m%d}.t{ts:%H}z.wrfsfcf00.4var.grib2"
+    if cached.exists():
+        return cached
+    cached.parent.mkdir(parents=True, exist_ok=True)
     url = f"{HRRR_BASE_URL}/hrrr.{ts:%Y%m%d}/conus/hrrr.t{ts:%H}z.wrfsfcf00.grib2"
-    raw, tmp = out_dir / f"{final.stem}.grib2.part", out_dir / f"{final.name}.part"
+    tmp = _part(cached)
     try:
         with requests.Session() as s:
             idx = _get(s, url + ".idx")
             if idx.status_code == 404:
-                return False
-            with open(raw, "wb") as f:
+                return None
+            with open(tmp, "wb") as f:
                 for start, end in parse_idx_ranges(idx.text):
                     r = _get(s, url, {"Range": f"bytes={start}-{'' if end is None else end}"})
                     if r.status_code not in (200, 206):
                         raise RuntimeError(f"HTTP {r.status_code} for {url} bytes {start}-{end}")
                     f.write(r.content)
-        grib_to_cropped_tif(raw, tmp, dem_crs, dem_bounds)
-        tmp.replace(final)            # atomic: a partial file never looks complete
+        os.replace(tmp, cached)       # atomic: a partial file never looks complete
     finally:
-        raw.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+    return cached
+
+
+def _fetch_hour(ts: pd.Timestamp, out_dir: Path, dem_crs, dem_bounds) -> bool:
+    """Crop one analysis hour to the case.  False if the archive has no such hour."""
+    final = out_dir / tif_name(ts)
+    if final.exists():
+        return True
+    grib = _cached_grib(ts)
+    if grib is None:
+        return False
+    tmp = _part(final)
+    try:
+        grib_to_cropped_tif(grib, tmp, dem_crs, dem_bounds)
+        os.replace(tmp, final)
+    finally:
         tmp.unlink(missing_ok=True)
     return True
 
@@ -205,3 +237,31 @@ def pack_zip(tif_dir: Path, hours, zip_path: Path) -> Path:
             z.write(tif_dir / tif_name(ts), arcname=tif_name(ts))
     tmp.replace(zip_path)
     return zip_path
+
+
+# ---------------------------------------------------------------------------
+# Pipeline step
+# ---------------------------------------------------------------------------
+
+def _download_case(case_dir: Path):
+    import runWindninja    # imported here: runWindninja imports this module too
+    inputs = case_dir / cfg.INPUTS_SUBDIR_NAME
+    hrrr_dir = inputs / cfg.WINDNINJA_SUBDIR / cfg.HRRR_LOCAL_SUBDIR
+    if (inputs / cfg.WS_TIF_NAME).exists():
+        return skipped(f"{cfg.WS_TIF_NAME} already exists")
+    if (hrrr_dir / COMPLETE_MARKER).exists():
+        return skipped("HRRR hours already downloaded")
+    wxs, landscape = inputs / cfg.WXS_FILE_NAME, case_dir / runWindninja.LANDSCAPE
+    require(landscape, hint="run the landfire step first")
+    require(wxs, hint="run the weather step first")
+    hours = runWindninja.hourly_window(case_dir, runWindninja.read_wxs(wxs)).index
+    download_hrrr(landscape, hours[0], hours[-1], hrrr_dir)
+    (hrrr_dir / COMPLETE_MARKER).write_text(f"{hours[0]} {hours[-1]}\n")
+
+
+def main(case_dir=None):
+    return for_each_case(_download_case, case_dir)
+
+
+if __name__ == "__main__":
+    main()

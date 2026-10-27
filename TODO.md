@@ -38,7 +38,7 @@ Effort: S = hours, M = a day or two.
 
 ## HPC / laptop portability
 
-- [ ] **Download stage for offline compute nodes (M).** `--start download` (login node) runs only
+- [x] **Download stage for offline compute nodes (M).** `--start download` (login node) runs only
       LANDFIRE / OpenMeteo / HRRR for all cases; compute job runs the rest.
 - [x] **CPU budget (S).** Derive worker/thread defaults from `sched_getaffinity` /
       `SLURM_CPUS_PER_TASK`; set `OMP_NUM_THREADS`/`GDAL_NUM_THREADS` per case; PDF workers likewise.
@@ -52,7 +52,7 @@ Effort: S = hours, M = a day or two.
       use float32. Re-enable metrics CSV export (`getValidationPDF.py:1564`).
 - [x] **Setup reads national datasets in full (M).** Satellite gpkg, MTBS, NIFC FOD: use pyogrio
       `where=`/`bbox=`/`columns=`. Drop the forced `set_crs(..., allow_override=True)`.
-- [ ] **HRRR shared cache (M).** Overlapping fires re-download the same hours.
+- [x] **HRRR shared cache (M).** Overlapping fires re-download the same hours.
 - [x] **`snap_to_valid_fuel` (S).** Re-reads a growing window one ring at a time (`common.py:150`);
       double the radius or use a distance transform.  Done: doubling window, exact nearest pixel.
 

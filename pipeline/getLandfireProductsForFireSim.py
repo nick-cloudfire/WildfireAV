@@ -1,4 +1,3 @@
-# getLandfireProductsForFireSim.py
 """
 Step 1 of runPipelineParallel: download LANDFIRE rasters via the LFPS API.
 
@@ -27,7 +26,7 @@ import geopandas as gpd
 import pandas as pd
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from common import SKIPPED, atomic_write, for_each_case, progress, require
+from common import atomic_write, for_each_case, progress, require, skipped
 from parallel_api import get_thread_session
 from pyproj import CRS
 
@@ -35,7 +34,6 @@ from pyproj import CRS
 # Config
 # ---------------------------------------------------------------------------
 
-FIREPAIRS_ROOT  = cfg.FIRE_ROOT
 EMAIL           = cfg.LANDFIRE_EMAIL
 EXPAND          = cfg.EXPAND
 FIRESCAR_NAME   = cfg.BURN_SHAPE_NAME
@@ -49,45 +47,21 @@ MAX_RETRIES     = cfg.LFPS_MAX_ATTEMPTS
 # LANDFIRE dataset version tables
 # ---------------------------------------------------------------------------
 
-# Maps fire year → (version prefix, version suffix) for CC/CH/CBH/CBD products
-LF_FUEL_VERSIONS = {
-    2016: ("LF2016_"),
-    2022: ("LF2022_"),
-    2023: ("LF2023_"),
-    2024: ("LF2024_"),
-}
-
-DATASET_YEARS = sorted(LF_FUEL_VERSIONS.keys())
+# LANDFIRE fuel/canopy releases on LFPS (product names "LF<year>_FBFM40", ...).
+# A fire uses the latest release not newer than its year.
+DATASET_YEARS = [2016, 2022, 2023, 2024]
 
 
 # ---------------------------------------------------------------------------
 # Product list builder
 # ---------------------------------------------------------------------------
 
-def build_products_for_fire_year(fire_year, log=print) -> list[str]:
-    """Return the LFPS Layer_List for the best LANDFIRE dataset year."""
-    if fire_year is None or pd.isna(fire_year):
-        dataset_year = min(DATASET_YEARS)
-    else:
-        y = int(fire_year)
-        candidates = [dy for dy in DATASET_YEARS if dy <= y]
-        dataset_year = max(candidates) if candidates else min(DATASET_YEARS)
-
-    prefix = LF_FUEL_VERSIONS[dataset_year]
-    log(
-        f"LF dataset year {dataset_year} "
-        f"(prefix='{prefix}')"
-    )
-
-    fuels_canopy = [
-        f"{prefix}FBFM40",
-        f"{prefix}CC",
-        f"{prefix}CH",
-        f"{prefix}CBH",
-        f"{prefix}CBD",
-    ]
-    products = TERRAIN_PRODUCTS + fuels_canopy
-    log(f"  Products: {products}")
+def build_products_for_fire_year(fire_year) -> list[str]:
+    """LFPS Layer_List: terrain + fuel model and canopy layers of the matching release."""
+    older = [y for y in DATASET_YEARS if pd.notna(fire_year) and y <= int(fire_year)]
+    release = max(older) if older else min(DATASET_YEARS)
+    products = TERRAIN_PRODUCTS + [f"LF{release}_{layer}" for layer in ("FBFM40", "CC", "CH", "CBH", "CBD")]
+    progress(f"LANDFIRE {release} release: {', '.join(products)}")
     return products
 
 
@@ -207,107 +181,47 @@ def _unpack_and_clean(folder: Path, zip_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-folder worker
-# ---------------------------------------------------------------------------
-
-def process_folder(folder: Path, summary: pd.DataFrame | None = None, log=None):
-    """
-    Download LANDFIRE for one case folder.
-
-    Returns (folder_name, success, message).
-    """
-    if log is None:
-        log = progress
-
-    firescar = folder / FIRESCAR_NAME
-    if not firescar.exists():
-        return (folder.name, True, "skipped (no firescar)")
-    lf_tif = folder / "LANDFIRE.tif"
-    if lf_tif.exists():
-        log("skipped – LANDFIRE.tif already exists")
-        return (folder.name, True, "skipped (already exists)")
-
-    log(f"Processing {folder.name}")
-
-    # Determine fire year
-    if summary is not None:
-        fire_year = summary.loc[folder.name, "fire_year"]
-    else:
-        meta = read_case_metadata(folder)
-        fire_year = pd.to_datetime(
-            meta.get("perim_ignition"), errors="coerce"
-        ).year
-
-    products = build_products_for_fire_year(fire_year, log=log)
-
-    # Build expanded bbox (WGS84)
-    g = gpd.read_file(firescar)
-    if g.crs is None or g.crs.to_epsg() != 4326:
-        g = g.to_crs(4326)
-    bounds = g.total_bounds
-    w, h   = bounds[2] - bounds[0], bounds[3] - bounds[1]
-    expanded = (
-        bounds[0] - EXPAND * w / 2,
-        bounds[1] - EXPAND * h / 2,
-        bounds[2] + EXPAND * w / 2,
-        bounds[3] + EXPAND * h / 2,
-    )
-
-    epsg = _best_utm_crs(expanded).to_epsg()
-    log(f"  Output CRS: EPSG:{epsg}")
-
-    zip_path = folder / cfg.LANDFIRE_ZIP_NAME
-    last_exc: BaseException | None = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        if attempt > 1:
-            log(f"  Retry {attempt}/{MAX_RETRIES} after: {last_exc}")
-            # clean up any partial files before retrying
-            zip_path.unlink(missing_ok=True)
-            tmp = folder / "_tmp"
-            if tmp.exists():
-                shutil.rmtree(tmp)
-
-        try:
-            log(f"  Submitting LFPS job … (attempt {attempt}/{MAX_RETRIES})")
-            job_id = _submit_job(products, expanded, epsg)
-            log(f"  Job ID: {job_id}")
-            log(f"  Status URL: {BASE_API}/api/job/status?JobId={job_id}")
-
-            log("  Polling …")
-            status_json = _poll_job(job_id, log=log)
-
-            url = status_json.get("outputFile")
-            if not url:
-                raise RuntimeError("No download URL in LFPS response")
-
-            log("  Downloading …")
-            _download_zip(url, zip_path)
-
-            log("  Unpacking …")
-            _unpack_and_clean(folder, zip_path)
-
-            log("  Done.")
-            return (folder.name, True, "done")
-
-        except Exception as exc:
-            last_exc = exc
-            if attempt == MAX_RETRIES:
-                break
-
-    raise RuntimeError(
-        f"LANDFIRE download failed after {MAX_RETRIES} attempts: {last_exc}"
-    ) from last_exc
-
-
-# ---------------------------------------------------------------------------
-# main
+# Case runner
 # ---------------------------------------------------------------------------
 
 def _process(folder: Path):
-    require(folder / FIRESCAR_NAME, hint="created by setupPipeline")
-    _, _, msg = process_folder(folder)
-    return SKIPPED if msg.startswith("skipped") else None
+    lf_tif = folder / "LANDFIRE.tif"
+    if lf_tif.exists():
+        return skipped("LANDFIRE.tif already exists")
+    firescar = folder / FIRESCAR_NAME
+    require(firescar, hint="created by setupPipeline")
+    fire_year = pd.to_datetime(read_case_metadata(folder).get("perim_ignition"), errors="coerce").year
+    products = build_products_for_fire_year(fire_year)
+
+    # Burn perimeter bounding box (WGS84), widened by EXPAND x its size on each axis
+    bounds = gpd.read_file(firescar).to_crs(4326).total_bounds
+    w, h = bounds[2] - bounds[0], bounds[3] - bounds[1]
+    expanded = (bounds[0] - EXPAND * w / 2, bounds[1] - EXPAND * h / 2,
+                bounds[2] + EXPAND * w / 2, bounds[3] + EXPAND * h / 2)
+    epsg = _best_utm_crs(expanded).to_epsg()
+    progress(f"Output CRS: EPSG:{epsg}")
+
+    zip_path = folder / cfg.LANDFIRE_ZIP_NAME
+    last_exc: BaseException | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        if attempt > 1:
+            progress(f"Retry {attempt}/{MAX_RETRIES} after: {last_exc}")
+            zip_path.unlink(missing_ok=True)
+            shutil.rmtree(folder / "_tmp", ignore_errors=True)
+        try:
+            job_id = _submit_job(products, expanded, epsg)
+            progress(f"LFPS job {job_id} submitted (attempt {attempt}/{MAX_RETRIES}); "
+                     f"status: {BASE_API}/api/job/status?JobId={job_id}")
+            url = _poll_job(job_id, log=progress).get("outputFile")
+            if not url:
+                raise RuntimeError("No download URL in LFPS response")
+            progress("Downloading …")
+            _download_zip(url, zip_path)
+            _unpack_and_clean(folder, zip_path)
+            return None
+        except Exception as exc:
+            last_exc = exc
+    raise RuntimeError(f"LANDFIRE download failed after {MAX_RETRIES} attempts: {last_exc}") from last_exc
 
 
 def main(case_dir=None):

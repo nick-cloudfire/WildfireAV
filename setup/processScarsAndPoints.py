@@ -1,4 +1,3 @@
-# processScarsAndPoints.py
 """
 Step 1 of setupPipeline: match MTBS burn perimeters to USFS ignition points.
 

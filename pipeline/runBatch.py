@@ -102,8 +102,9 @@ def _signal_error(rc: int) -> str:
 
 
 class Batch:
-    def __init__(self, folders: list[Path], workers: int, heartbeat_s: float):
+    def __init__(self, folders: list[Path], workers: int, heartbeat_s: float, download_only: bool = False):
         self.folders = folders
+        self.download_only = download_only
         self.workers = max(1, min(workers, len(folders)))
         self.heartbeat_s = heartbeat_s
         self.results: list[Result] = []
@@ -156,7 +157,8 @@ class Batch:
 
         t0 = time.monotonic()
         proc = subprocess.Popen(
-            [sys.executable, "-u", str(DRIVER), str(folder), "--quiet"],
+            [sys.executable, "-u", str(DRIVER), str(folder), "--quiet"]
+            + (["--download-only"] if self.download_only else []),
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=self._case_env,
         )
         with self._lock:
@@ -300,14 +302,15 @@ def print_report(results: list[Result], total_s: float, csv_path: Path | None) -
     print("=" * 72)
 
 
-def run_batch(folders: list[Path], workers: int, heartbeat_min: float = None) -> int:
+def run_batch(folders: list[Path], workers: int, heartbeat_min: float = None, download_only: bool = False) -> int:
     """Run cases and print the report.  Returns a process exit code."""
     if not folders:
         print("No cases to process.")
         return 0
     heartbeat_min = cfg.BATCH_HEARTBEAT_MIN if heartbeat_min is None else heartbeat_min
-    batch = Batch(folders, workers, heartbeat_s=heartbeat_min * 60)
-    print(f"Running {len(folders)} case(s), {batch.workers} at a time  ·  wind={describe_wind()}  ·  "
+    batch = Batch(folders, workers, heartbeat_s=heartbeat_min * 60, download_only=download_only)
+    print(f"Running {len(folders)} case(s){' (downloads only)' if download_only else ''}, "
+          f"{batch.workers} at a time  ·  wind={describe_wind()}  ·  "
           f"heartbeat every {heartbeat_min:g} min  ·  per-case logs: <case>/{LOG_FILE}\n", flush=True)
     t0 = time.monotonic()
     results = batch.run()
@@ -345,6 +348,9 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                    help="skip cases that already have ELMFIRE output (and do not clean anything)")
     p.add_argument("--heartbeat", type=float, default=cfg.BATCH_HEARTBEAT_MIN, metavar="MIN",
                    help="minutes between progress heartbeats (0 = off)")
+    p.add_argument("--download-only", action="store_true",
+                   help="only the steps that need internet (LANDFIRE, ERA5, HRRR), e.g. on an HPC login "
+                        "node; nothing is cleaned.  Then run the rest on compute nodes with --resume")
     p.add_argument("--no-preflight", action="store_true", help="skip the environment checks")
     p.add_argument("--dry-run", action="store_true", help="list cases and exit")
 
@@ -366,9 +372,9 @@ def main() -> int:
         return 0
     if not args.no_preflight:
         import preflight
-        if not preflight.run(folders, args.workers):
+        if not preflight.run(folders, args.workers, download_only=args.download_only):
             return 2
-    return run_batch(folders, args.workers, args.heartbeat)
+    return run_batch(folders, args.workers, args.heartbeat, args.download_only)
 
 
 if __name__ == "__main__":

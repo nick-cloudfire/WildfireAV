@@ -41,7 +41,6 @@ from liveFuelMoisture import live_moisture
 # Constants
 # ---------------------------------------------------------------------------
 
-FIRE_ROOT        = Path(cfg.FIRE_ROOT)
 PREIGNITION_DAYS = cfg.CONDITIONING_DAYS
 M1_FILENAME      = cfg.FMC_FILE_NAMES[0]
 M10_FILENAME     = cfg.FMC_FILE_NAMES[1]
@@ -446,23 +445,9 @@ def _process(case_dir: Path):
     print(f"  farsite.input  ({start_dt:%Y-%m-%d %H:%M} -> {end_dt:%Y-%m-%d %H:%M})")
 
 
-def _write_run_all(fire_root: Path) -> None:
-    """(Re)generate runAllFarsite.txt from all farsite.txt files under *fire_root*."""
-    lines = []
-    for d in sorted(fire_root.iterdir()):
-        if d.is_dir() and d.name.isdigit():
-            p = d / "farsite" / "farsite.txt"
-            if p.exists():
-                lines.append(p.read_text().strip())
-    out = fire_root / "runAllFarsite.txt"
-    out.write_text("\n".join(lines) + "\n")
-    print(f"\nWrote {len(lines)} entries to {out}")
-
-
 def main(case_dir=None):
     return for_each_case(_process, case_dir)
 
 
 if __name__ == "__main__":
     main()
-    _write_run_all(FIRE_ROOT)

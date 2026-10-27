@@ -22,8 +22,9 @@ Per case it writes
 Steps
 -----
 See ``plan()``: landfire, split_bands, adj_phi, weather, live_moisture,
-windninja, nelson, barrier, elmfire_inputs, prepare_farsite, run_elmfire,
-run_farsite.
+hrrr (WINDNINJA_MODE = "hrrrLocal"), windninja, nelson, barrier,
+elmfire_inputs, prepare_farsite, run_elmfire, run_farsite.  With
+--download-only a case stops after the last step that needs internet.
 
 Every step skips itself when its outputs already exist, so re-running a case
 resumes where it stopped.
@@ -62,14 +63,24 @@ LOG_FILE    = "pipeline.log"
 # Step plan
 # ---------------------------------------------------------------------------
 
-def plan() -> list[tuple[str, str]]:
-    """Return the ordered [(step_key, module_name), ...]."""
-    return [
+def plan(download_only: bool = False) -> list[tuple[str, str]]:
+    """Return the ordered [(step_key, module_name), ...].
+
+    download_only: stop after the last step that needs internet (LANDFIRE,
+    ERA5 weather and live moisture, HRRR), e.g. on an HPC login node.
+    """
+    downloads = [
         ("landfire",        "getLandfireProductsForFireSim"),
         ("split_bands",     "splitLandfireTifBands"),
         ("adj_phi",         "makePhiAndAdjFiles"),
         ("weather",         "downloadWeatherData"),
         ("live_moisture",   "liveFuelMoisture"),
+    ]
+    if cfg.WINDNINJA_MODE == "hrrrLocal":
+        downloads.append(("hrrr", "downloadHrrr"))
+    if download_only:
+        return downloads
+    return downloads + [
         ("windninja",       "runWindninja"),
         ("nelson",          "applyNelsonModel"),
         ("barrier",         "getBarrierFile"),
@@ -234,13 +245,13 @@ def _on_signal(signum, _frame):
 # Case runner
 # ---------------------------------------------------------------------------
 
-def process_case(case_dir: Path, quiet: bool = False) -> bool:
+def process_case(case_dir: Path, quiet: bool = False, download_only: bool = False) -> bool:
     """Run every step for one case.  Returns True on success, False on failure."""
     case_dir = Path(case_dir).absolute()
     if not case_dir.is_dir():
         raise FileNotFoundError(f"case directory not found: {case_dir}")
 
-    steps = plan()
+    steps = plan(download_only)
     status = CaseStatus(case_dir, steps)
     common.STATUS = status
 
@@ -294,11 +305,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("case_dir", nargs="?", help="case directory, e.g. /scratch/me/FirePairs/00001")
     p.add_argument("--quiet", "-q", action="store_true", help="write only to pipeline.log")
     p.add_argument("--list-steps", action="store_true", help="print the step plan and exit")
+    p.add_argument("--download-only", action="store_true", help="stop after the download steps")
     args = p.parse_args(argv)
 
     if args.list_steps or not args.case_dir:
         print(f"Step plan (wind={describe_wind()}):")
-        for i, (key, module) in enumerate(plan(), 1):
+        for i, (key, module) in enumerate(plan(args.download_only), 1):
             print(f"  {i:2d}. {key:<24} {module}.py")
         if not args.case_dir and not args.list_steps:
             print("\nFor many cases use runBatch.py or runWildfireAV.")
@@ -307,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     try:
-        return 0 if process_case(Path(args.case_dir), quiet=args.quiet) else 1
+        return 0 if process_case(Path(args.case_dir), args.quiet, args.download_only) else 1
     except Interrupted:
         return 143
 

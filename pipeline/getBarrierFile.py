@@ -35,31 +35,28 @@ def _clip(bounds, crs, src: Path, layer: str | None, out: Path, where: str | Non
     if not shutil.which("ogr2ogr"):
         raise RuntimeError("ogr2ogr not found on PATH (install GDAL)")
     epsg = crs.to_epsg()
-    cmd = ["ogr2ogr", "-f", "GPKG", str(out), str(src)] + ([layer] if layer else [])
-    cmd += ["-spat", *map(str, (bounds.left, bounds.bottom, bounds.right, bounds.top)),
-            "-spat_srs", f"EPSG:{epsg}" if epsg else crs.to_wkt()]
-    if where:
-        cmd += ["-where", where]
-    run_subprocess(cmd, timeout=hours(cfg.GDAL_TIMEOUT_H))
+    with atomic_write(out) as tmp:   # an interrupted clip is never reused
+        cmd = ["ogr2ogr", "-f", "GPKG", str(tmp), str(src)] + ([layer] if layer else [])
+        cmd += ["-spat", *map(str, (bounds.left, bounds.bottom, bounds.right, bounds.top)),
+                "-spat_srs", f"EPSG:{epsg}" if epsg else crs.to_wkt()]
+        if where:
+            cmd += ["-where", where]
+        run_subprocess(cmd, timeout=hours(cfg.GDAL_TIMEOUT_H))
 
 
-def _read(path: Path, layer: str | None, crs, bounds) -> gpd.GeoDataFrame:
-    gdf = gpd.read_file(path, layer=layer) if layer else gpd.read_file(path)
+def _read(path: Path, crs, bounds) -> gpd.GeoDataFrame:
+    gdf = gpd.read_file(path)
     if gdf.empty:
         return gdf
     gdf = gdf.to_crs(crs).cx[bounds.left:bounds.right, bounds.bottom:bounds.top]
     return gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty]
 
 
-def _union(geoms):
-    return geoms.union_all() if hasattr(geoms, "union_all") else geoms.unary_union
-
-
 def _buffered(gdf: gpd.GeoDataFrame, width_m: float) -> list[tuple[dict, float]]:
     """[(shape, width)] for the union of gdf buffered by width/2; [] if nothing."""
     if gdf is None or gdf.empty or width_m <= 0:
         return []
-    union = _union(gdf.geometry)
+    union = gdf.geometry.union_all()
     if union is None or union.is_empty:
         return []
     buf = union.buffer(width_m / 2.0)
@@ -87,26 +84,23 @@ def _process(folder: Path):
     if crs is None or crs.is_geographic:
         raise ValueError(f"{template} must have a projected CRS (metres) for barrier buffering; got {crs}")
 
-    roads_src, roads_lyr = Path(cfg.ROADS_GPKG), cfg.ROADS_LAYER
-    water_src, water_lyr = Path(cfg.WATER_GPKG), cfg.WATER_LAYER
-    backup_src = Path(cfg.BACKUP_WATER_GPKG) if Path(cfg.BACKUP_WATER_GPKG).exists() else None
-    tmp = [inputs / cfg.BARRIER_ROADS_CLIP_NAME, inputs / cfg.BARRIER_WATER_CLIP_NAME,
-           inputs / cfg.BARRIER_BACKUP_CLIP_NAME]
-    if cfg.WRITE_TEMP_CLIPS:
-        _clip(bounds, crs, roads_src, roads_lyr, tmp[0], where=f"{cfg.ROAD_CLASS_FIELD} IS NOT NULL")
-        _clip(bounds, crs, water_src, water_lyr, tmp[1], where=f"{cfg.WATER_CLASS_FIELD} IS NOT NULL")
-        (roads_src, roads_lyr), (water_src, water_lyr) = (tmp[0], None), (tmp[1], None)
-        if backup_src:
-            _clip(bounds, crs, backup_src, None, tmp[2])
-            backup_src = tmp[2]
+    # Case-sized clips of the national datasets (also read by prepareFarsite for barrier.shp)
+    roads_clip = inputs / cfg.BARRIER_ROADS_CLIP_NAME
+    water_clip = inputs / cfg.BARRIER_WATER_CLIP_NAME
+    backup_clip = inputs / cfg.BARRIER_BACKUP_CLIP_NAME
+    _clip(bounds, crs, Path(cfg.ROADS_GPKG), cfg.ROADS_LAYER, roads_clip, where=f"{cfg.ROAD_CLASS_FIELD} IS NOT NULL")
+    _clip(bounds, crs, Path(cfg.WATER_GPKG), cfg.WATER_LAYER, water_clip, where=f"{cfg.WATER_CLASS_FIELD} IS NOT NULL")
+    has_backup = Path(cfg.BACKUP_WATER_GPKG).exists()
+    if has_backup:
+        _clip(bounds, crs, Path(cfg.BACKUP_WATER_GPKG), None, backup_clip)
 
-    roads = _read(roads_src, roads_lyr, crs, bounds)
-    water = _read(water_src, water_lyr, crs, bounds)
-    backup = _read(backup_src, None, crs, bounds) if backup_src else gpd.GeoDataFrame(geometry=[], crs=crs)
+    roads = _read(roads_clip, crs, bounds)
+    water = _read(water_clip, crs, bounds)
+    backup = _read(backup_clip, crs, bounds) if has_backup else gpd.GeoDataFrame(geometry=[], crs=crs)
 
     # Backup rivers only where the primary dataset has nothing within tolerance
     if not backup.empty and not water.empty:
-        prim = _union(water.geometry).buffer(cfg.BARRIER_BACKUP_MATCH_TOL_M)
+        prim = water.geometry.union_all().buffer(cfg.BARRIER_BACKUP_MATCH_TOL_M)
         backup = backup[~backup.geometry.intersects(prim)]
 
     # Within a layer later classes overwrite earlier ones (rasterize order);
@@ -124,10 +118,6 @@ def _process(folder: Path):
         dst.write(arr, 1)
     print(f"  {len(roads)} road, {len(water)} waterway, {len(backup)} backup-river features "
           f"-> {out_tif.name} ({100 * (arr > 0).mean():.2f}% barrier pixels)")
-
-    if cfg.WRITE_TEMP_CLIPS and not cfg.KEEP_TEMP_CLIPS:
-        for p in tmp:
-            p.unlink(missing_ok=True)
 
 
 def main(case_dir=None):

@@ -104,10 +104,6 @@ class Case:
     def score(self, model: ModelConfig, metric: str) -> float:
         return float(self.metrics.get(f"{model.key}_{metric}", np.nan))
 
-    @property
-    def has_outputs(self) -> bool:
-        return any(self.model_toas.values())
-
 
 # ---------------------------------------------------------------------------
 # Raster comparison
