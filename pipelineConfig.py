@@ -79,6 +79,8 @@ BASE_DATA               = Path(__file__).resolve().parent   # this repository
 BASE_VALIDATION         = BASE_DATA.parent
 FARSITE_FB_DIR          = Path.home() / "farsite" / "bin"  # Wine FARSITE binary directory
 FARSITE_EXE_NAME        = "TestFARSITE.exe"               # Wine executable name
+REPORT_COPY_DIR         = None      # also copy the validation report (PDF + CSV) here, e.g. your home
+                                    # directory when FIRE_ROOT is on cluster scratch; None = don't
 
 # Derived paths: evaluated after the local/env overrides (bottom of this file),
 # so they follow the roots.  Each one can still be overridden on its own.
@@ -204,7 +206,7 @@ WINDNINJA_CONDA_ENV         = None                  # None: WindNinja_cli from P
 WINDNINJA_WX_MODEL_TYPE     = "PASTCAST-GCP-HRRR-CONUS-3-KM"
 WINDNINJA_TIME_ZONE         = "UTC"
 WINDNINJA_MESH_UNITS        = "m"
-WINDNINJA_OUTPUT_HEIGHT     = 20.0                  # m above ground
+WINDNINJA_OUTPUT_HEIGHT     = 20.0                  # above ground, in WINDNINJA_OUTPUT_HEIGHT_UNITS (20 ft)
 WINDNINJA_OUTPUT_HEIGHT_UNITS = "ft"
 WINDNINJA_MAX_WINDOW_DAYS   = 13    # WindNinja hard-fails above 14 days; 13 is safe
 WINDNINJA_MESH_RESOLUTION_FACTOR = 4  # mesh_resolution = cellsize * this factor

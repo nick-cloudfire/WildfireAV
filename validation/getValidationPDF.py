@@ -3,7 +3,7 @@
 Validation report: every case's simulated burn area compared with the observed
 MTBS perimeter, for each fire model (ELMFIRE, FARSITE).
 
-Writes to FIRE_ROOT:
+Writes to FIRE_ROOT (and copies to REPORT_COPY_DIR, if set):
     validation_report.pdf   cover, four summary pages, one page per case
     validation_metrics.csv  one row per evaluated case (areas, scores, wind)
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -99,9 +100,18 @@ def main(cases: list[str] | None = None, out_pdf: Path | None = None) -> None:
             plt.close(fig)
     log.info("Wrote %s", out_pdf)
 
+    written = [out_pdf]
     if evaluated and not single:
         pd.DataFrame([c.metrics for c in evaluated]).to_csv(out_csv, index=False)
         log.info("Wrote %s", out_csv)
+        written.append(out_csv)
+
+    if cfg.REPORT_COPY_DIR:
+        dest = Path(cfg.REPORT_COPY_DIR)
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in written:
+            shutil.copy2(f, dest / f.name)
+        log.info("Copied %s to %s", ", ".join(f.name for f in written), dest)
 
 
 if __name__ == "__main__":

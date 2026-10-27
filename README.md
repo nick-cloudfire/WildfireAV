@@ -312,6 +312,9 @@ python -u runWildfireAV --start run --resume
   `pipelineConfig.py` (not version-controlled). List only what differs, e.g.
   `FIRE_ROOT = Path("/scratch/me/FirePairs")`. Any setting can also be set
   per job as `export WAV_<NAME>=…`.
+- **Report off scratch:** set `REPORT_COPY_DIR` (e.g. to a folder in your
+  home directory). The report PDF and metrics CSV are then copied there every
+  time they're made.
 - **Time limits:** external programs have their own limits (`*_TIMEOUT_H`), so
   a hung program fails its case instead of holding a worker. On SIGTERM,
   running cases stop cleanly; resubmit with `--resume`.
