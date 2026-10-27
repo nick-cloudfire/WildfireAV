@@ -56,6 +56,7 @@ EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE
 LANDFIRE_EMAIL              = os.environ.get("LFPS_EMAIL", "")  # export LFPS_EMAIL=you@example.com (checked by preflight)
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 0         # cases at once in runBatch (0 = one per available CPU)
+TEST_RUN_CASES              = 10        # cases run with --test (the first N case folders)
 BATCH_HEARTBEAT_MIN         = 10        # minutes between batch progress heartbeats (0 = off)
 PREFLIGHT_MIN_FREE_GB       = 50        # warn when FIRE_ROOT has less free disk than this
 SETUP_PIPELINE_MAX_WORKERS  = 0         # parallel workers for getSatelliteEndTimes (0 = available CPUs)

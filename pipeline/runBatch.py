@@ -61,8 +61,12 @@ def is_done(case_dir: Path) -> bool:
     return outputs.is_dir() and any(outputs.glob("time_of_arrival_*.tif"))
 
 
-def discover(case_root: Path, specific: list[str] | None, skip_done: bool) -> list[Path]:
+def discover(case_root: Path, specific: list[str] | None, skip_done: bool, test: bool = False) -> list[Path]:
     folders = case_dirs(case_root, specific)
+    if test:
+        folders = folders[:cfg.TEST_RUN_CASES]
+        print(f"Test run: the first {len(folders)} case(s) (TEST_RUN_CASES = {cfg.TEST_RUN_CASES}): "
+              + " ".join(f.name for f in folders))
     if skip_done:
         before = len(folders)
         folders = [f for f in folders if not is_done(f)]
@@ -344,6 +348,8 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--workers", "-n", type=int, default=cfg.MAX_PARALLEL_CASES,
                    help="cases to run at once")
     p.add_argument("--cases", nargs="+", metavar="ID", help="only these case folders (e.g. 00001 3)")
+    p.add_argument("--test", action="store_true",
+                   help="test run: only the first TEST_RUN_CASES cases (pipelineConfig, default 10)")
     p.add_argument("--skip-done", "--resume", dest="skip_done", action="store_true",
                    help="skip cases that already have ELMFIRE output (and do not clean anything)")
     p.add_argument("--heartbeat", type=float, default=cfg.BATCH_HEARTBEAT_MIN, metavar="MIN",
@@ -366,7 +372,7 @@ def main() -> int:
     if not case_root.is_dir():
         print(f"ERROR: case root does not exist: {case_root}", file=sys.stderr)
         return 2
-    folders = discover(case_root, args.cases, args.skip_done)
+    folders = discover(case_root, args.cases, args.skip_done, args.test)
     if args.dry_run:
         print_dry_run(folders)
         return 0

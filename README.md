@@ -246,6 +246,7 @@ The pipeline downloads LANDFIRE, ERA5 and HRRR itself for each fire.
 ./runWildfireAV --start run              # re-run every case from scratch, then report
 ./runWildfireAV --start run --resume     # continue: keep outputs, skip finished cases
 ./runWildfireAV --start run --cases 1 5  # only these cases
+./runWildfireAV --start run --test       # quick test: first 10 cases, own report (validation_report_test.pdf)
 ./runWildfireAV --start run --dry-run    # list cases and their last state
 ./runWildfireAV --start pdf              # rebuild the report only
 ```
@@ -357,6 +358,7 @@ you're most likely to change:
 | `ROAD_WIDTHS_M`, `WATER_WIDTHS_M` | | Barrier width per road / waterway class |
 | `ELMFIRE_*`, `FARSITE_*` | | Model settings and executable locations |
 | `MAX_PARALLEL_CASES` | 0 = one per CPU | Cases run at once |
+| `TEST_RUN_CASES` | 10 | Cases run with `--test` |
 
 `python pipeline/preflight.py` lists the settings you've overridden.
 

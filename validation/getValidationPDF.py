@@ -8,7 +8,7 @@ Writes to FIRE_ROOT:
     validation_metrics.csv  one row per evaluated case (areas, scores, wind)
 
     python validation/getValidationPDF.py                 # all cases
-    python validation/getValidationPDF.py --cases 12 47   # only these (no summary pages)
+    python validation/getValidationPDF.py --cases 12 47   # only these -> validation_00012_00047.pdf
 
 How the scores are computed: caseMetrics.py.  Page layouts: casePage.py,
 summaryPages.py.
@@ -62,15 +62,19 @@ def _evaluate(folder: Path) -> Case | Exception:
         return e
 
 
-def main(cases: list[str] | None = None) -> None:
+def main(cases: list[str] | None = None, out_pdf: Path | None = None) -> None:
+    """Report on all cases, or only *cases*; summary pages and a metrics CSV when there are several."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("pyproj").setLevel(logging.CRITICAL)
     logging.getLogger("fontTools").setLevel(logging.WARNING)
     folders = case_dirs(cfg.FIRE_ROOT, cases)
     if not folders:
         raise RuntimeError(f"No cases found under {cfg.FIRE_ROOT}")
-    single = cases is not None
-    out_pdf = OUT_PDF.with_name(f"validation_{'_'.join(f.name for f in folders)}.pdf") if single else OUT_PDF
+    single = len(folders) == 1
+    if out_pdf is None:
+        out_pdf = OUT_PDF if cases is None else OUT_PDF.with_name(f"validation_{'_'.join(f.name for f in folders)}.pdf")
+    out_csv = OUT_CSV if out_pdf == OUT_PDF else out_pdf.with_name(
+        out_pdf.stem.replace("validation_report", "validation_metrics") + ".csv")
 
     log.info("Evaluating %d case(s) …", len(folders))
     with ThreadPoolExecutor(max_workers=min(cfg.MAX_PARALLEL_CASES, len(folders))) as pool:
@@ -96,8 +100,8 @@ def main(cases: list[str] | None = None) -> None:
     log.info("Wrote %s", out_pdf)
 
     if evaluated and not single:
-        pd.DataFrame([c.metrics for c in evaluated]).to_csv(OUT_CSV, index=False)
-        log.info("Wrote %s", OUT_CSV)
+        pd.DataFrame([c.metrics for c in evaluated]).to_csv(out_csv, index=False)
+        log.info("Wrote %s", out_csv)
 
 
 if __name__ == "__main__":

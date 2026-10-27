@@ -9,6 +9,7 @@ Usage
   runWildfireAV --start run --resume     # keep outputs, skip finished cases (after a timeout)
   runWildfireAV --start pdf              # regenerate the validation pdf only
   runWildfireAV --start run --dry-run    # show what would run and each case's last status
+  runWildfireAV --start run --test       # only the first TEST_RUN_CASES (10) cases; own report
 
   HPC whose compute nodes have no internet:
   runWildfireAV --start run --download-only   # login node: LANDFIRE, ERA5, HRRR only
@@ -18,6 +19,7 @@ Options for the run phase
 -------------------------
   --workers N        cases at once (default MAX_PARALLEL_CASES)
   --cases ID ...     only these cases (e.g. 00001 3)
+  --test             only the first TEST_RUN_CASES cases (default 10); report: validation_report_test.pdf
   --resume           (= --skip-done) skip cases with ELMFIRE output; nothing is cleaned
   --download-only    only the steps that need internet; nothing is cleaned, no pdf
   --heartbeat MIN    minutes between progress heartbeats (default BATCH_HEARTBEAT_MIN)
@@ -87,7 +89,7 @@ def phase_setup() -> int:
 
 def phase_run(args, clean: bool) -> int:
     import runBatch
-    folders = runBatch.discover(FIRE_ROOT, args.cases, args.skip_done)
+    folders = runBatch.discover(FIRE_ROOT, args.cases, args.skip_done, args.test)
     if args.dry_run:
         runBatch.print_dry_run(folders)
         return 0
@@ -107,14 +109,19 @@ def preflight_first(args) -> bool:
     import runBatch
     if args.start == "setup":
         return preflight.run(None, args.workers, fresh=True)
-    folders = runBatch.discover(FIRE_ROOT, args.cases, args.skip_done)
+    folders = runBatch.discover(FIRE_ROOT, args.cases, args.skip_done, args.test)
     return not folders or preflight.run(folders, args.workers, fresh=not (args.skip_done or args.download_only),
                                         download_only=args.download_only)
 
 
-def phase_pdf() -> int:
+def phase_pdf(args) -> int:
+    import runBatch
     import validation.getValidationPDF as pdf
-    pdf.main()
+    if args.test:      # a report of just the test cases, next to the full one
+        folders = runBatch.discover(FIRE_ROOT, args.cases, False, test=True)
+        pdf.main([f.name for f in folders], out_pdf=FIRE_ROOT / "validation_report_test.pdf")
+    else:
+        pdf.main()
     return 0
 
 
@@ -171,7 +178,7 @@ def main() -> int:
             elif phase == "run":
                 phase_rc = phase_run(args, clean=not (args.skip_done or args.download_only))
             else:
-                phase_rc = phase_pdf()
+                phase_rc = phase_pdf(args)
         except Exception:
             traceback.print_exc()
             phase_rc = 1
