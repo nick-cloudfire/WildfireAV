@@ -61,7 +61,10 @@ def run_farsite(case_dir: Path):
         )
 
     # ---- run ------------------------------------------------------------
-    wine_env = {**os.environ, "WINEDEBUG": "-all"}
+    # PWD: Wine takes its working directory from PWD when it names the same folder, else from
+    # the fully resolved path - which can contain a folder Windows mistakes for a program
+    # (e.g. a cluster mount like /net/fs001.example.com/), giving "Bad EXE format".
+    wine_env = {**os.environ, "WINEDEBUG": "-all", "PWD": str(farsite_dir)}
     if not FARSITE_EXE.exists():
         raise FileNotFoundError(f"FARSITE binary not found: {FARSITE_EXE} (FARSITE_FB_DIR / FARSITE_EXE_NAME)")
     print(f"  Running: wine64 {FARSITE_EXE.name} farsite.txt")
