@@ -54,7 +54,9 @@ folders (`FirePairs/00001/`, …). The settings named below are in
 2. **Ignition point.** The perimeter is matched to a record in the NIFC fire
    occurrence database with the same name, a discovery date within
    `DAY_TOLERANCE_DAYS` (±2 days), and a location inside the perimeter. The
-   reported discovery location is the simulated ignition point.
+   reported discovery location is the simulated ignition point, moved to the
+   nearest burnable cell that no road or waterway crosses (FARSITE cannot
+   ignite on a barrier). Both models start from the same point.
 3. **Start and end times from satellites.** VIIRS and MODIS active-fire
    detections inside the perimeter are buffered by `SAT_HOTSPOT_BUFFER_DIST`
    (200 m), and their covered area is accumulated overpass by overpass.
@@ -407,9 +409,15 @@ and quotes the error.
 - **Setup finds no cases:** the error names the filter that removed
   everything (size, year, name and date match, or location) and the setting
   to relax.
-- **"No burnable fuel within 2000 cells of the ignition point":** the
-  reported ignition is far outside burnable LANDFIRE fuel. This is usually a
-  bad ignition record.
+- **FARSITE prints "No ignition" and writes no output:** its ignition cell is
+  under a barrier (FARSITE removes those cells). Cases prepared before the
+  ignition was kept off barriers need their inputs rebuilt:
+  `python cleanPipelineOutputs.py --from-step elmfire_inputs --cases <ids>`.
+- **"No burnable fuel clear of barriers within 2000 cells of the ignition
+  point":** the reported ignition is far outside burnable LANDFIRE fuel. This
+  is usually a bad ignition record.
+- **"Ignition point … lies outside fbfm40.tif":** LANDFIRE.tif does not cover
+  the fire; re-download it with `--from-step landfire`.
 
 ## Repository layout
 

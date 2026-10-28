@@ -31,6 +31,7 @@ from typing import Callable, Iterator
 import numpy as np
 import pandas as pd
 import rasterio
+from rasterio.features import rasterize
 from rasterio.transform import xy as transform_xy
 from rasterio.windows import Window
 
@@ -205,16 +206,42 @@ def for_each_case(fn: Callable[[Path], object], case_dir=None):
 # Ignition snapping (ELMFIRE namelist and FARSITE ignition shapefile)
 # ---------------------------------------------------------------------------
 
+def barrier_cells(case_dir: Path, fuels_tif: Path) -> np.ndarray:
+    """Cells of fuels_tif touched by a road or waterway (the features of FARSITE's barrier.shp).
+
+    FARSITE removes ignition cells under a barrier and then stops with "No
+    ignition", so the ignition point is kept off these cells, for ELMFIRE too
+    so both models start from the same point.
+    """
+    import geopandas as gpd
+
+    with rasterio.open(fuels_tif) as ds:
+        shape, transform, crs = (ds.height, ds.width), ds.transform, ds.crs
+    inputs = Path(case_dir) / cfg.INPUTS_SUBDIR_NAME
+    geoms = []
+    for name in (cfg.BARRIER_ROADS_CLIP_NAME, cfg.BARRIER_WATER_CLIP_NAME, cfg.BARRIER_BACKUP_CLIP_NAME):
+        if (inputs / name).exists():
+            gdf = gpd.read_file(inputs / name)
+            if not gdf.empty:
+                geoms += [g for g in gdf.to_crs(crs).geometry if g is not None and not g.is_empty]
+    if not geoms:
+        return np.zeros(shape, dtype=bool)
+    return rasterize(((g, 1) for g in geoms), out_shape=shape, transform=transform,
+                     fill=0, dtype="uint8", all_touched=True).astype(bool)
+
+
 def snap_to_valid_fuel(
     fuels_tif: Path,
     x: float,
     y: float,
     valid_min: float = 101.0,
     max_radius_cells: int = 2000,
+    blocked: np.ndarray | None = None,
 ) -> tuple[float, float, bool]:
     """
     Snap (x, y) to the centre of the nearest pixel with fuel code >= valid_min
-    (i.e. a burnable FBFM40 class).  Returns (x, y, was_moved).
+    (i.e. a burnable FBFM40 class) that is not ``blocked`` (a boolean array on
+    the fuels grid, e.g. :func:`barrier_cells`).  Returns (x, y, was_moved).
     """
     with rasterio.open(fuels_tif) as ds:
         row0, col0 = ds.index(x, y)
@@ -239,6 +266,8 @@ def snap_to_valid_fuel(
                 valid &= arr != ds.nodata
             if np.issubdtype(arr.dtype, np.floating):
                 valid &= ~np.isnan(arr)
+            if blocked is not None:
+                valid &= ~blocked[r0:r1 + 1, c0:c1 + 1]
             if valid.any():
                 rows, cols = np.nonzero(valid)
                 rows, cols = rows + r0, cols + c0
@@ -253,5 +282,6 @@ def snap_to_valid_fuel(
             r = min(max(2 * r, 1), max_radius_cells)
 
     raise RuntimeError(
-        f"No burnable fuel (FBFM40 >= {valid_min:g}) within {max_radius_cells} cells of the ignition point"
+        f"No burnable fuel (FBFM40 >= {valid_min:g}) clear of barriers within {max_radius_cells} cells "
+        "of the ignition point"
     )

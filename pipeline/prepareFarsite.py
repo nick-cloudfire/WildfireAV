@@ -38,7 +38,7 @@ from rasterio.warp import reproject, Resampling as RioResampling
 
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from common import (atomic_write, case_window, for_each_case, ignition_hour, read_wxs, require,
+from common import (atomic_write, barrier_cells, case_window, for_each_case, ignition_hour, read_wxs, require,
                     require_starts_at, skipped, snap_to_valid_fuel)
 from parallel_api import hours
 from liveFuelMoisture import live_moisture
@@ -118,8 +118,8 @@ def _burn_period_lines(start_dt, end_dt):
     return lines
 
 
-def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path) -> bool:
-    """Snap the ignition shapefile point to the nearest valid fuel cell in-place.
+def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path, blocked: np.ndarray) -> bool:
+    """Snap the ignition shapefile point in place to the nearest burnable cell off a barrier.
 
     Returns True if the point was moved.
     """
@@ -135,7 +135,7 @@ def _snap_ignition_shp(ignition_shp: Path, fuels_tif: Path) -> bool:
     coords = feat["geometry"]["coordinates"]
     x, y   = float(coords[0]), float(coords[1])
 
-    x_snap, y_snap, moved = snap_to_valid_fuel(fuels_tif, x, y)
+    x_snap, y_snap, moved = snap_to_valid_fuel(fuels_tif, x, y, blocked=blocked)
     if not moved:
         return False
 
@@ -316,8 +316,8 @@ def _process(case_dir: Path):
         ],
     )
     fuels_tif = (case_dir / INPUTS / FBFM_FILENAME).with_suffix(".tif")
-    snapped   = _snap_ignition_shp(farsite_dir / "ignition.shp", fuels_tif)
-    print("  ignition.shp" + ("  (snapped to valid fuel)" if snapped else ""))
+    snapped   = _snap_ignition_shp(farsite_dir / "ignition.shp", fuels_tif, barrier_cells(case_dir, fuels_tif))
+    print("  ignition.shp" + ("  (snapped to burnable fuel clear of barriers)" if snapped else ""))
 
     # ---- barrier.shp (optional) ----------------------------------------
     if USE_BARRIER:

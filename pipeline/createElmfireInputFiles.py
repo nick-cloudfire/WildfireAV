@@ -21,7 +21,7 @@ from pyproj import Transformer
 
 import pipelineConfig as cfg
 from case_metadata import read_case_metadata
-from common import (atomic_write, case_window, for_each_case, ignition_hour, require, require_starts_at,
+from common import (atomic_write, barrier_cells, case_window, for_each_case, ignition_hour, require, require_starts_at,
                     skipped, snap_to_valid_fuel)
 from liveFuelMoisture import live_moisture
 
@@ -121,10 +121,11 @@ def _process(case_dir: Path):
         raise ValueError(f"{dem} has no CRS")
 
     x0, y0 = _ignition_xy(dem_crs, ign)
-    x, y, moved = snap_to_valid_fuel(fuels, x0, y0)
+    x, y, moved = snap_to_valid_fuel(fuels, x0, y0, blocked=barrier_cells(case_dir, fuels))
     lon, lat = Transformer.from_crs(dem_crs, "EPSG:4326", always_xy=True).transform(x, y)
+    moved_m = ((x - x0) ** 2 + (y - y0) ** 2) ** 0.5
     print(f"  Ignition {x:.2f}, {y:.2f} ({lat:.5f}, {lon:.5f})"
-          + (f" — snapped {((x - x0) ** 2 + (y - y0) ** 2) ** 0.5:.0f} m to burnable fuel" if moved else ""))
+          + (f" — snapped {moved_m:.0f} m to burnable fuel clear of barriers" if moved else ""))
 
     hour_of_year = int((start - pd.Timestamp(year=start.year, month=1, day=1)).total_seconds() // 3600)
     text = build_namelist((end - start).total_seconds(), x, y, start.year, hour_of_year, n_met,
