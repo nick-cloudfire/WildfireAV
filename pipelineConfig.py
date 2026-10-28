@@ -48,17 +48,17 @@ from pathlib import Path
 # 1. USER-MODIFIABLE PARAMETERS
 # =============================================================================
 
-MTBS_AREA_THRESHOLD_ACRES   = 5000      # minimum burn area to include (acres)
-MIN_FIRE_YEAR               = 2024      # earliest fire year to process
+MTBS_AREA_THRESHOLD_ACRES   = 500      # minimum burn area to include (acres)
+MIN_FIRE_YEAR               = 2018      # earliest fire year to process
 MAX_FIRE_YEAR               = 2025      # latest  fire year to process
 DAY_TOLERANCE_DAYS          = 2         # ±days when matching perimeters to points
-EXPAND                      = 1.5       # fractional bbox expansion for LANDFIRE download
+EXPAND                      = 1.8       # fractional bbox expansion for LANDFIRE download
 LANDFIRE_EMAIL              = os.environ.get("LFPS_EMAIL", "")  # export LFPS_EMAIL=you@example.com (checked by preflight)
 CONDITIONING_DAYS           = 20        # pre-ignition weather window (days)
 MAX_PARALLEL_CASES          = 0         # cases at once in runBatch (0 = one per available CPU)
 TEST_RUN_CASES              = 10        # cases run with --test (the first N case folders)
 BATCH_HEARTBEAT_MIN         = 10        # minutes between batch progress heartbeats (0 = off)
-PREFLIGHT_MIN_FREE_GB       = 50        # warn when FIRE_ROOT has less free disk than this
+PREFLIGHT_MIN_FREE_GB       = 500        # warn when FIRE_ROOT has less free disk than this
 SETUP_PIPELINE_MAX_WORKERS  = 0         # parallel workers for getSatelliteEndTimes (0 = available CPUs)
 MIN_SATELLITE_OVERPASSES    = 4         # keep fires seen at >= this many distinct satellite detection
                                         # times (overpasses, not hotspots) while simulated
