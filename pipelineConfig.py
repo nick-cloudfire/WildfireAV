@@ -68,7 +68,7 @@ MIN_SATELLITE_OVERPASSES    = 4         # keep fires seen at >= this many distin
 # job's time limit.  Set generously: a real large fire must not hit them.
 ELMFIRE_TIMEOUT_H           = 24
 FARSITE_TIMEOUT_H           = 24
-WINDNINJA_TIMEOUT_H         = 12        # per WindNinja run (one time chunk)
+WINDNINJA_TIMEOUT_H         = 24        # per WindNinja run (one chunk, up to WINDNINJA_MAX_WINDOW_DAYS)
 NELSON_TIMEOUT_H            = 4
 GDAL_TIMEOUT_H              = 2         # gdal_translate / ogr2ogr / gdalwarp calls
 
@@ -222,6 +222,8 @@ HRRR_MIN_BUFFER_M           = 6000.0    # minimum padding (m); HRRR cells are 3 
 HRRR_DOWNLOAD_THREADS       = 4         # concurrent hours per case (keep low when running many cases)
 HRRR_DOWNLOAD_RETRIES       = 4
 HRRR_DOWNLOAD_TIMEOUT_S     = 120
+HRRR_FORECAST_FILL_H        = 3         # analysis hour missing from the archive (common in 2018): use the
+                                        # forecast valid then from a run up to N h earlier (0 = fail instead)
 
 # =============================================================================
 # 10. ELMFIRE SIMULATION

@@ -151,13 +151,15 @@ def _part(path: Path) -> Path:
     return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
 
 
-def _cached_grib(ts: pd.Timestamp) -> Path | None:
-    """The hour's four CONUS messages from the cache, downloaded if needed (None: not in archive)."""
-    cached = Path(cfg.HRRR_CACHE_DIR) / f"hrrr.{ts:%Y%m%d}.t{ts:%H}z.wrfsfcf00.4var.grib2"
+def _cached_grib(valid: pd.Timestamp, lead: int) -> Path | None:
+    """The four CONUS messages valid at *valid* from the run *lead* hours earlier (lead 0 =
+    analysis), from the cache or downloaded (None: not in the archive)."""
+    run = valid - pd.Timedelta(hours=lead)
+    cached = Path(cfg.HRRR_CACHE_DIR) / f"hrrr.{run:%Y%m%d}.t{run:%H}z.wrfsfcf{lead:02d}.4var.grib2"
     if cached.exists():
         return cached
     cached.parent.mkdir(parents=True, exist_ok=True)
-    url = f"{HRRR_BASE_URL}/hrrr.{ts:%Y%m%d}/conus/hrrr.t{ts:%H}z.wrfsfcf00.grib2"
+    url = f"{HRRR_BASE_URL}/hrrr.{run:%Y%m%d}/conus/hrrr.t{run:%H}z.wrfsfcf{lead:02d}.grib2"
     tmp = _part(cached)
     try:
         with requests.Session() as s:
@@ -176,33 +178,41 @@ def _cached_grib(ts: pd.Timestamp) -> Path | None:
     return cached
 
 
-def _fetch_hour(ts: pd.Timestamp, out_dir: Path, dem_crs, dem_bounds) -> bool:
-    """Crop one analysis hour to the case.  False if the archive has no such hour."""
+def _fetch_hour(ts: pd.Timestamp, out_dir: Path, dem_crs, dem_bounds) -> int | None:
+    """Crop the hour to the case.  Returns the forecast lead used (0 = analysis; already
+    cropped hours count as 0) or None if the archive has neither the analysis nor a
+    forecast up to HRRR_FORECAST_FILL_H hours old for it."""
     final = out_dir / tif_name(ts)
     if final.exists():
-        return True
-    grib = _cached_grib(ts)
-    if grib is None:
-        return False
+        return 0
+    for lead in range(cfg.HRRR_FORECAST_FILL_H + 1):
+        grib = _cached_grib(ts, lead)
+        if grib is not None:
+            break
+    else:
+        return None
     tmp = _part(final)
     try:
         grib_to_cropped_tif(grib, tmp, dem_crs, dem_bounds)
         os.replace(tmp, final)
     finally:
         tmp.unlink(missing_ok=True)
-    return True
+    return lead
 
 
 def hours_between(start, stop) -> pd.DatetimeIndex:
     return pd.date_range(pd.Timestamp(start).floor("h"), pd.Timestamp(stop).floor("h"), freq="h")
 
 
-def download_hrrr(dem_path: Path, start, stop, out_dir: Path) -> Path:
+def download_hrrr(dem_path: Path, start, stop, out_dir: Path) -> dict[pd.Timestamp, int]:
     """
     Fill ``out_dir`` with cropped HRRR GeoTIFFs for every hour in [start, stop] (naive UTC).
 
-    Existing hours are kept, so a re-run resumes.  Raises if any hour is
-    missing from the archive (WindNinja cannot interpolate across a gap).
+    An hour whose analysis is missing from the archive (common in 2018) is filled
+    with the forecast valid at that hour from a run up to HRRR_FORECAST_FILL_H
+    hours earlier.  Existing hours are kept, so a re-run resumes.  Raises if an
+    hour still has no data (WindNinja cannot interpolate across a gap).
+    Returns {hour: forecast lead} of the filled hours.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     dem_crs, dem_bounds = dem_footprint(Path(dem_path))
@@ -211,20 +221,27 @@ def download_hrrr(dem_path: Path, start, stop, out_dir: Path) -> Path:
           f"({THREADS} threads, {HRRR_BASE_URL})")
 
     t0 = time.monotonic()
-    missing, done, every = [], 0, max(1, -(-len(hours) // 10))   # ~10 progress lines
+    missing, filled, done, every = [], {}, 0, max(1, -(-len(hours) // 10))   # ~10 progress lines
     with ThreadPoolExecutor(max_workers=max(1, THREADS)) as ex:
         futs = {ex.submit(_fetch_hour, t, out_dir, dem_crs, dem_bounds): t for t in hours}
         for fut in as_completed(futs):
-            if not fut.result():
+            lead = fut.result()
+            if lead is None:
                 missing.append(futs[fut])
+            elif lead:
+                filled[futs[fut]] = lead
             done += 1
             if done % every == 0 or done == len(hours):
                 progress(f"HRRR download {done}/{len(hours)} h ({fmt_duration(time.monotonic() - t0)})")
+    if filled:
+        leads = sorted(set(filled.values()))
+        print(f"  HRRR: {len(filled)} hour(s) missing from the archive filled with forecasts "
+              f"({', '.join(f'{lead} h' for lead in leads)}) from earlier runs")
     if missing:
         missing.sort()
-        raise RuntimeError(f"HRRR archive has no analysis for {len(missing)} hour(s), "
-                           f"first {missing[0]:%Y-%m-%d %H}Z")
-    return out_dir
+        raise RuntimeError(f"HRRR archive has no analysis or forecast up to {cfg.HRRR_FORECAST_FILL_H} h old "
+                           f"for {len(missing)} hour(s), first {missing[0]:%Y-%m-%d %H}Z")
+    return dict(sorted(filled.items()))
 
 
 def pack_zip(tif_dir: Path, hours, zip_path: Path) -> Path:
@@ -255,8 +272,10 @@ def _download_case(case_dir: Path):
     require(landscape, hint="run the landfire step first")
     require(wxs, hint="run the weather step first")
     hours = runWindninja.hourly_window(case_dir, read_wxs(wxs)).index
-    download_hrrr(landscape, hours[0], hours[-1], hrrr_dir)
-    (hrrr_dir / COMPLETE_MARKER).write_text(f"{hours[0]} {hours[-1]}\n")
+    filled = download_hrrr(landscape, hours[0], hours[-1], hrrr_dir)
+    (hrrr_dir / COMPLETE_MARKER).write_text(
+        f"{hours[0]} {hours[-1]}\n"
+        + "".join(f"{t:%Y-%m-%d %H}Z filled with the {lead} h forecast\n" for t, lead in filled.items()))
 
 
 def main(case_dir=None):

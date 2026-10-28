@@ -382,8 +382,16 @@ and quotes the error.
   Don't cancel and resubmit by hand; that sends you to the back of the queue.
 - **Open-Meteo errors 429/5xx** are retried with back-off. Missing values near
   the present mean ERA5 has not caught up yet (it lags about 5 days).
-- **"HRRR archive has no analysis for N hours":** the public archive has a
-  gap. Use `WINDNINJA_MODE = "wxsFile"` for that case.
+- **HRRR gaps:** the public archive misses some analysis hours, mostly in
+  2018. Such hours are filled with the forecast valid then from a run up to
+  `HRRR_FORECAST_FILL_H` (3) hours earlier, and listed in the case's
+  `inputs/windninja/hrrr/DOWNLOAD_COMPLETE`. Only if those are missing too does
+  the case fail ("no analysis or forecast"); use `WINDNINJA_MODE = "wxsFile"`
+  for it.
+- **WindNinja times out on long fires:** each run covers up to 13 days of
+  hours, and a large domain on one thread can exceed `WINDNINJA_TIMEOUT_H`
+  (24 h). Give it more threads (`WINDNINJA_NUM_THREADS`; preflight warns if
+  workers × threads exceeds the CPUs).
 - **"GDAL GRIB driver missing":** run `conda install -c conda-forge libgdal-grib`.
 - **WindNinja: `PROJ: proj_create_from_database: Open of …/share/proj
   failed`**, followed by "Unable to calculate angle departure from north".

@@ -107,6 +107,7 @@ def make_stack(in_dir: Path, suffix: str, out_tif: Path, first_hour=None) -> pd.
             "gdal_translate", "-q", str(vrt), str(out_tif),
             "-of", "GTiff",
             "-co", "COMPRESS=lzw",
+            "-co", "INTERLEAVE=BAND",       # steps read one hour at a time; PIXEL would decompress all
             "-co", "TILED=YES",
             "-co", "BIGTIFF=IF_SAFER",
         ], timeout=hours(cfg.GDAL_TIMEOUT_H))
@@ -174,7 +175,7 @@ def pad_to_reference(stack_tif: Path, reference_tif: Path) -> None:
 
     profile.update(
         height=target_h, width=target_w, transform=transform,
-        compress="lzw", tiled=True, bigtiff="IF_SAFER",
+        compress="lzw", tiled=True, bigtiff="IF_SAFER", interleave="band",
     )
     with rasterio.open(stack_tif, "w", **profile) as dst:
         dst.write(data)

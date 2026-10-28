@@ -66,7 +66,7 @@ def _process(case_dir: Path):
             bsq = out.with_suffix(".bsq")
             require(bsq, hint="Nelson exited 0 but did not write this output")
             with atomic_write(out) as tmp:
-                _translate(bsq, tmp, "-of", "GTiff", "-co", "COMPRESS=ZSTD", "-co", "BIGTIFF=YES",
+                _translate(bsq, tmp, "-of", "GTiff", "-co", "COMPRESS=ZSTD", "-co", "INTERLEAVE=BAND", "-co", "BIGTIFF=YES",
                            "-co", f"NUM_THREADS={os.environ.get('GDAL_NUM_THREADS', 'ALL_CPUS')}")
                 with rasterio.open(tmp) as ds:
                     n = ds.count

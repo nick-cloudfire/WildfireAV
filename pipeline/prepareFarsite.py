@@ -165,6 +165,22 @@ def _write_asc(data: np.ndarray, cellsize: float, xllcorner: float, yllcorner: f
     np.savetxt(str(out_path), safe, header=header, comments="", fmt="%.4f")
 
 
+def _band_interleaved(tif: Path, workdir: Path) -> Path:
+    """tif, or a band-interleaved copy of it in workdir if it is pixel-interleaved.
+
+    Reading one band of a pixel-interleaved stack decompresses every band, so
+    going through a long fire hour by hour took hours (ws/wd.tif made before
+    wn_to_geotiff wrote them band-interleaved).
+    """
+    with rasterio.open(tif) as ds:
+        if ds.count == 1 or ds.profile.get("interleave", "band") == "band":
+            return tif
+    copy = workdir / f"_{tif.name}"
+    _run(["gdal_translate", "-q", "-co", "INTERLEAVE=BAND", "-co", "COMPRESS=LZW", "-co", "TILED=YES",
+          "-co", "BIGTIFF=IF_SAFER", str(tif), str(copy)])
+    return copy
+
+
 def _build_wind_grids(ws_tif: Path, wd_tif: Path, winds_dir: Path, band_times, end_dt) -> list:
     """Resample ws.tif/wd.tif bands valid up to end_dt to coarser ASC grids; return ATM entries.
 
@@ -368,11 +384,11 @@ def _process(case_dir: Path):
 
     # ---- wind grids (ATM file) -----------------------------------------
     winds_dir   = farsite_dir / "winds"
-    atm_entries = _build_wind_grids(
-        case_dir / INPUTS / WS_TIF_NAME,
-        case_dir / INPUTS / WD_TIF_NAME,
-        winds_dir, wind_times, end_dt,
-    )
+    ws_tif = _band_interleaved(case_dir / INPUTS / WS_TIF_NAME, farsite_dir)
+    wd_tif = _band_interleaved(case_dir / INPUTS / WD_TIF_NAME, farsite_dir)
+    atm_entries = _build_wind_grids(ws_tif, wd_tif, winds_dir, wind_times, end_dt)
+    for copy in {ws_tif, wd_tif} - {case_dir / INPUTS / WS_TIF_NAME, case_dir / INPUTS / WD_TIF_NAME}:
+        copy.unlink()
     atm_path = farsite_dir / "winds.atm"
     with atm_path.open("w", newline="\n") as f:
         f.write("ENGLISH\n")
