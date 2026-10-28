@@ -218,8 +218,14 @@ def snap_to_valid_fuel(
     """
     with rasterio.open(fuels_tif) as ds:
         row0, col0 = ds.index(x, y)
-        row0 = min(max(row0, 0), ds.height - 1)
-        col0 = min(max(col0, 0), ds.width - 1)
+        if not (0 <= row0 < ds.height and 0 <= col0 < ds.width):
+            b = ds.bounds
+            raise ValueError(
+                f"Ignition point ({x:.0f}, {y:.0f}) lies outside {fuels_tif.name} "
+                f"({b.left:.0f}, {b.bottom:.0f}, {b.right:.0f}, {b.top:.0f}); the LANDFIRE "
+                "domain should contain the whole burn perimeter. Re-download it: "
+                "cleanPipelineOutputs.py --from-step landfire --cases <id>"
+            )
 
         # Square windows of doubling radius.  A hit at distance d is the nearest
         # one once the window covers the whole circle of radius d (d <= r).
