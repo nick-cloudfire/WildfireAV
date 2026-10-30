@@ -22,7 +22,7 @@ RULE     = "#d9d7d0"         # hairlines, table rules
 GRID     = "#ebe9e3"
 PANEL    = "#f6f5f1"         # stat tiles, table header fill
 MISSED   = "#d6d3ca"         # observed but not simulated (map)
-BARRIER  = "#a3a097"         # roads / rivers (map)
+BARRIER  = "#c4c1b8"         # roads / rivers (map)
 SATELLITE = INK              # satellite coverage curve
 
 matplotlib.rcParams.update({

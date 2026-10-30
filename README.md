@@ -334,7 +334,7 @@ In `FIRE_ROOT` (default `../FirePairs`):
 
 | File | Contents |
 |---|---|
-| `validation_report.pdf` | Cover (best/worst cases), scores vs. wind speed, fire size and duration, area bias per case, score histograms, then one page per case |
+| `validation_report.pdf` | Cover (counts, headline scores), best/worst cases, score distributions, ELMFIRE vs. FARSITE, area bias, scores vs. wind / fire size / duration, then one page per case (bookmarked per case when `pypdf` is installed) |
 | `validation_metrics.csv` | One row per case: fire name and year, observed and simulated areas, Jaccard, Sørensen, κ, area ratio, mean wind |
 | `validation_ignitions.gpkg` | The same table as points at each fire's reported ignition location (EPSG:4326, layer `ignitions`), to map the scores in QGIS / ArcGIS |
 | `fire_pairs_summary_with_satellite.csv` | Every case with its ignition, satellite start/end and fire-out times |
@@ -342,11 +342,13 @@ In `FIRE_ROOT` (default `../FirePairs`):
 | `hrrr_cache/` | HRRR hours shared between cases (safe to delete) |
 
 Each case page shows:
-- a map of the simulated burned areas and arrival-time isochrones of both
-  models over the observed perimeter, with the ignition point and barriers
-- the scores
-- area-growth curves of both models against simulation time
-- the satellite-detected area against date
+- one map per model on the same extent: cells simulated and observed,
+  simulated only, and observed only (missed); arrival-time isochrones at
+  round intervals; the observed perimeter, ignition point and barriers
+- the scores, with the better model's value in bold
+- burned area against hours since the satellite ignition (simulation time
+  0) for both models and the satellite detections, with the observed final
+  area and the 90 %-covered time marked
 
 Each case folder holds `case_metadata.json` (name, times, areas) and all
 inputs and outputs from the step table above. It also has `pipeline.log`, a

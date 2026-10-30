@@ -64,7 +64,9 @@ RIGHT_W   = 0.275
 @dataclass
 class _Layers:
     crs:       object
-    extent:    tuple[float, float, float, float]     # left, right, bottom, top of the cropped window
+    view:      tuple[float, float, float, float]     # left, right, bottom, top shown on the map
+    extent:    tuple[float, float, float, float]     # the same for the cropped rasters (inside the domain)
+    domain:    tuple[float, float, float, float]     # the same for the whole simulation grid
     cell:      float                                 # metres per drawn pixel
     observed:  np.ndarray                            # bool
     barrier:   np.ndarray | None                     # bool
@@ -72,13 +74,13 @@ class _Layers:
     perimeter: object                                # observed perimeter, shapely, in crs
 
 
-def _on_grid(src, src_crs, base, window: Window) -> np.ndarray:
-    """Band 1 of src (float32, nodata -> NaN) resampled (nearest) onto *window* of the base grid."""
-    if src.name == base.name and window == Window(0, 0, base.width, base.height):
+def _on_grid(src, src_crs, base) -> np.ndarray:
+    """Band 1 of src (float32, nodata -> NaN) resampled (nearest) onto the base grid."""
+    if src.name == base.name:
         return read_toa(src)
-    out = np.full((int(window.height), int(window.width)), np.nan, dtype=np.float32)
+    out = np.full((base.height, base.width), np.nan, dtype=np.float32)
     reproject(read_toa(src), out, src_transform=src.transform, src_crs=src_crs,
-              dst_transform=base.window_transform(window), dst_crs=base.crs or src_crs,
+              dst_transform=base.transform, dst_crs=base.crs or src_crs,
               resampling=Resampling.nearest, src_nodata=np.nan, dst_nodata=np.nan)
     return out
 
@@ -87,59 +89,55 @@ def _burned(toa: np.ndarray) -> np.ndarray:
     return np.isfinite(toa) & (toa >= BURN_THRESHOLD)
 
 
-def _window(base, crs, perimeter, toas: dict[str, np.ndarray]) -> Window:
-    """Window of the base grid around the observed perimeter and every simulated burn, padded."""
+def _fire_bounds(base, perimeter, toas: dict[str, np.ndarray]) -> tuple[float, float, float, float]:
+    """(left, right, bottom, top) around the observed perimeter and every simulated burn, padded."""
     minx, miny, maxx, maxy = perimeter.bounds
-    rows, cols = [], []
     for toa in toas.values():
         r, c = np.nonzero(_burned(toa))
         if r.size:
-            rows += [r.min(), r.max() + 1]
-            cols += [c.min(), c.max() + 1]
-    if rows:
-        (x0, y0), (x1, y1) = base.transform * (min(cols), max(rows)), base.transform * (max(cols), min(rows))
-        minx, maxx, miny, maxy = min(minx, x0), max(maxx, x1), min(miny, y0), max(maxy, y1)
+            (x0, y0), (x1, y1) = base.transform * (c.min(), r.max() + 1), base.transform * (c.max() + 1, r.min())
+            minx, maxx, miny, maxy = min(minx, x0), max(maxx, x1), min(miny, y0), max(maxy, y1)
     pad = MAP_PAD * max(maxx - minx, maxy - miny)
-    win = rasterio.windows.from_bounds(minx - pad, miny - pad, maxx + pad, maxy + pad, base.transform)
-    c0, r0 = max(0, int(np.floor(win.col_off))), max(0, int(np.floor(win.row_off)))
-    c1 = min(base.width, int(np.ceil(win.col_off + win.width)))
-    r1 = min(base.height, int(np.ceil(win.row_off + win.height)))
-    return Window(c0, r0, c1 - c0, r1 - r0)
+    return minx - pad, maxx + pad, miny - pad, maxy + pad
 
 
-def _load(c: Case, present) -> _Layers:
+def _load(c: Case, present, choose_view) -> _Layers:
+    """Every map layer on the first model's grid, cropped to the view that choose_view(fire bounds) picks."""
     with rasterio.open(c.model_toas[present[0].label]) as base:
         crs = toa_crs(base, None)
-        full = Window(0, 0, base.width, base.height)
         toas = {}
         for mc in present:
             try:
                 with rasterio.open(c.model_toas[mc.label]) as src:
-                    toas[mc.label] = _on_grid(src, toa_crs(src, crs), base, full) * mc.to_hours
+                    toas[mc.label] = _on_grid(src, toa_crs(src, crs), base) * mc.to_hours
             except Exception as e:
                 log.warning("Case %s: %s not drawn on the map: %s", c.case_id, mc.label, e)
         perimeter = to_crs_robust(c.observed, crs).iloc[0]
-        win = _window(base, crs, perimeter, toas)
-        r0, c0 = int(win.row_off), int(win.col_off)
-        h, w = int(win.height), int(win.width)
-        step = max(1, int(np.ceil(max(h, w) / MAP_MAX_PX)))
-        crop = lambda a: a[r0:r0 + h:step, c0:c0 + w:step]
-        toas = {k: crop(v) for k, v in toas.items()}
+        view = choose_view(_fire_bounds(base, perimeter, toas))
 
-        transform = base.window_transform(win)
-        observed = rasterize([(perimeter, 1)], out_shape=(h, w), transform=transform,
-                             dtype=np.uint8).astype(bool)[::step, ::step]
+        win = rasterio.windows.from_bounds(view[0], view[2], view[1], view[3], base.transform)
+        c0, r0 = max(0, int(np.floor(win.col_off))), max(0, int(np.floor(win.row_off)))
+        c1 = min(base.width, int(np.ceil(win.col_off + win.width)))
+        r1 = min(base.height, int(np.ceil(win.row_off + win.height)))
+        win = Window(c0, r0, c1 - c0, r1 - r0)
+        step = max(1, int(np.ceil(max(win.height, win.width) / MAP_MAX_PX)))
+        crop = lambda a: a[r0:r1:step, c0:c1:step]
+
+        observed = rasterize([(perimeter, 1)], out_shape=(base.height, base.width), transform=base.transform,
+                             dtype=np.uint8).astype(bool)
         barrier = None
         path = c.case_dir / cfg.INPUTS_SUBDIR_NAME / cfg.BARRIER_FILE_NAME
         if path.exists():
             try:
                 with rasterio.open(path) as src:
-                    barrier = _on_grid(src, src.crs or crs, base, win)[::step, ::step] >= 1   # width (m)
+                    barrier = crop(_on_grid(src, src.crs or crs, base) >= 1)     # barrier width (m)
             except Exception as e:
                 log.warning("Case %s: barriers not drawn: %s", c.case_id, e)
         left, bottom, right, top = rasterio.windows.bounds(win, base.transform)
-        cell = abs(base.transform.a) * step
-    return _Layers(crs, (left, right, bottom, top), cell, observed, barrier, toas, perimeter)
+        d_left, d_bottom, d_right, d_top = base.bounds
+        return _Layers(crs, view, (left, right, bottom, top), (d_left, d_right, d_bottom, d_top),
+                       abs(base.transform.a) * step, crop(observed), barrier,
+                       {k: crop(v) for k, v in toas.items()}, perimeter)
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +209,9 @@ def _scale_bar(ax, width_m: float) -> None:
             bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.8))
 
 
-def _fit_extent(L: _Layers, ax_w_in: float, ax_h_in: float) -> tuple[float, float, float, float]:
-    """L's extent widened along one axis to the axes' aspect, so the map fills its box."""
-    left, right, bottom, top = L.extent
+def _fit_extent(bounds, ax_w_in: float, ax_h_in: float) -> tuple[float, float, float, float]:
+    """(left, right, bottom, top) widened along one axis to the axes' aspect, so the map fills its box."""
+    left, right, bottom, top = bounds
     w, h = right - left, top - bottom
     if w / h < ax_w_in / ax_h_in:
         grow = (h * ax_w_in / ax_h_in - w) / 2
@@ -222,20 +220,20 @@ def _fit_extent(L: _Layers, ax_w_in: float, ax_h_in: float) -> tuple[float, floa
     return left, right, bottom - grow, top + grow
 
 
-def _map(ax, c: Case, L: _Layers, mc, step_h: float, box_in) -> None:
+def _map(ax, c: Case, L: _Layers, mc, step_h: float) -> None:
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(False)
     for s in ax.spines.values():
         s.set_visible(True)
         s.set_color(RULE)
-    left, right, bottom, top = _fit_extent(L, *box_in)
+    left, right, bottom, top = L.view
     ax.set_xlim(left, right)
     ax.set_ylim(bottom, top)
     ax.set_aspect("equal", adjustable="box")
     ax.set_anchor("C")
 
-    img = np.zeros((*L.observed.shape, 4), dtype=np.float32)
+    img = np.ones((*L.observed.shape, 4), dtype=np.float32)          # opaque white: no alpha mask in the PDF
     toa = L.toa_h.get(mc.label)
     sim = _burned(toa) if toa is not None else np.zeros_like(L.observed)
     _rgba(L.observed & ~sim, MISSED, img)
@@ -253,6 +251,10 @@ def _map(ax, c: Case, L: _Layers, mc, step_h: float, box_in) -> None:
         p = c.ignition.to_crs(L.crs).geometry.iloc[0]
         ax.plot(p.x, p.y, marker="*", markersize=11, color="white", zorder=7, linestyle="none")
         ax.plot(p.x, p.y, marker="*", markersize=8, color=INK, zorder=8, linestyle="none")
+    if _domain_visible(L):
+        dl, dr, db, dt = L.domain
+        ax.add_patch(Rectangle((dl, db), dr - dl, dt - db, fill=False, edgecolor=INK_3, linewidth=0.6,
+                               linestyle=(0, (4, 3)), zorder=2))
     _scale_bar(ax, right - left)
 
     ax.set_title(mc.label, color=INK)
@@ -262,6 +264,11 @@ def _map(ax, c: Case, L: _Layers, mc, step_h: float, box_in) -> None:
                 color=INK_3, fontsize=10, bbox=dict(fc="white", ec="none", alpha=0.85))
     else:
         ax.set_title(f"Jaccard {c.score(mc, 'jaccard'):.3f}", loc="right", fontweight="normal", color=INK_2)
+
+
+def _domain_visible(L: _Layers) -> bool:
+    (l, r, b, t), (dl, dr, db, dt) = L.view, L.domain
+    return l < dl or r > dr or b < db or t > dt
 
 
 def _map_legend(fig, models, step_h: float, has_barrier: bool, has_ignition: bool) -> None:
@@ -286,30 +293,34 @@ def _map_legend(fig, models, step_h: float, has_barrier: bool, has_ignition: boo
 
 def _maps(fig, c: Case) -> None:
     present = [mc for mc in MODELS if c.model_toas.get(mc.label)]
-    L = _load(c, present)
-    step_h = _iso_step(L.toa_h, c.duration_h)
-
     left, bottom, width, height = MAPS_BOX
-    gap = 0.018
+    gap, n = 0.018, len(MODELS)
     page_w, page_h = fig.get_size_inches()
-    n = len(MODELS)
-    ew, eh = L.extent[1] - L.extent[0], L.extent[3] - L.extent[2]
-    side = ((width - gap * (n - 1)) / n * page_w, height * page_h)        # inches per map, side by side
-    stack = (width * page_w, (height - gap * 2 * (n - 1)) / n * page_h)    # stacked (room for titles)
-    scale = lambda box: min(box[0] / ew, box[1] / eh)
-    if scale(side) >= scale(stack):
-        w = (width - gap * (n - 1)) / n
-        rects = [(left + i * (w + gap), bottom, w, height) for i in range(n)]
-        box_in = side
-    else:
+    layout = {}
+
+    def choose_view(bounds):
+        """Side by side or stacked, whichever draws the fire larger; the view fills the map box."""
+        ew, eh = bounds[1] - bounds[0], bounds[3] - bounds[2]
+        side = ((width - gap * (n - 1)) / n * page_w, height * page_h)        # inches per map
+        stack = (width * page_w, (height - gap * 2 * (n - 1)) / n * page_h)    # (room for titles)
+        scale = lambda box: min(box[0] / ew, box[1] / eh)
+        if scale(side) >= scale(stack):
+            w = (width - gap * (n - 1)) / n
+            layout["rects"] = [(left + i * (w + gap), bottom, w, height) for i in range(n)]
+            return _fit_extent(bounds, *side)
         h = (height - gap * 2 * (n - 1)) / n
-        rects = [(left, bottom + (n - 1 - i) * (h + 2 * gap), width, h) for i in range(n)]
-        box_in = stack
-    for rect, mc in zip(rects, MODELS):
-        _map(fig.add_axes(rect), c, L, mc, step_h, box_in)
+        layout["rects"] = [(left, bottom + (n - 1 - i) * (h + 2 * gap), width, h) for i in range(n)]
+        return _fit_extent(bounds, *stack)
+
+    L = _load(c, present, choose_view)
+    step_h = _iso_step(L.toa_h, c.duration_h)
+    for rect, mc in zip(layout["rects"], MODELS):
+        _map(fig.add_axes(rect), c, L, mc, step_h)
     _map_legend(fig, MODELS, step_h, L.barrier is not None and L.barrier.any(), not c.ignition.empty)
-    fig.text(left, 0.045, f"Map grid {L.crs.to_string() if hasattr(L.crs, 'to_string') else L.crs}, "
-                          f"drawn at {L.cell:g} m per pixel.", fontsize=6.5, color=INK_3)
+    note = f"Map grid {L.crs.to_string() if hasattr(L.crs, 'to_string') else L.crs}, drawn at {L.cell:g} m per pixel."
+    if _domain_visible(L):
+        note += "  Dashed frame: edge of the simulation domain."
+    fig.text(left, 0.045, note, fontsize=6.5, color=INK_3)
 
 
 # ---------------------------------------------------------------------------
