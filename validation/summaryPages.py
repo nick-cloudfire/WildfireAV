@@ -5,7 +5,7 @@ Report pages that summarise all cases:
     rankings       the 10 best and 10 worst cases of each model, by Jaccard
     distributions  histogram and cumulative distribution of each score, models overlaid
     model vs model each case's Jaccard and area ratio, ELMFIRE against FARSITE
-    area bias      distribution of simulated / observed area, log2 scale
+    area bias      simulated / observed area of every case, sorted, log2 scale
     conditions     Jaccard and area ratio against wind, fire size and duration,
                    with binned medians (Sørensen = 2J / (1 + J), so it adds nothing here)
 
@@ -344,10 +344,39 @@ def _ratio_axis(axis, lo: float, hi: float) -> None:
 # Area bias
 # ---------------------------------------------------------------------------
 
+def ranked_bias(ax, log2_ratio: np.ndarray, color, lo: float, hi: float, unit: str = "cases") -> None:
+    """Every case as a horizontal bar of log2(simulated / observed area), sorted, largest at the top:
+    too large in the model colour, too small in its light tint, within 2x shaded, stats bottom right."""
+    v = np.sort(log2_ratio)
+    y = np.arange(v.size)
+    ax.axvspan(-1, 1, color=PANEL, zorder=0)
+    over = v >= 0
+    for mask, fill in ((over, color), (~over, tint(color, 0.6))):
+        if mask.any():
+            ax.fill_betweenx(y, 0, np.where(mask, v, 0), step="mid", color=fill, linewidth=0, zorder=2)
+    ax.axvline(0, color=INK, linewidth=0.9, zorder=3)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(-0.5, v.size - 0.5)
+    ax.set_yticks([])
+    ax.grid(True, axis="x")
+    ax.grid(False, axis="y")
+    ticks = np.arange(np.ceil(lo / 2) * 2, hi + 0.01, 2)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([_ratio_label(2.0 ** t) for t in ticks])
+    ax.text(0.01, 1.0, "← Too small", transform=ax.transAxes, ha="left", va="bottom", fontsize=8, color=INK_2)
+    ax.text(0.99, 1.0, "Too large →", transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color=INK_2)
+    stats = (f"{unit.capitalize()}  {v.size:,}\n"
+             f"Median ratio  {_ratio_value(2 ** np.median(v))}\n"
+             f"Too large  {100 * over.mean():.0f} %\n"
+             f"Within 2×  {100 * np.mean(np.abs(v) <= 1):.0f} %")
+    ax.text(0.98, 0.03, stats, transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, linespacing=1.6,
+            bbox=dict(boxstyle="round,pad=0.5", fc="white", ec=RULE, lw=0.6), zorder=5)
+
+
 def bias_page(cases: list[Case]) -> plt.Figure:
-    fig = new_page("Burned area bias", "Simulated / observed burned area of every scored case, log scale.  "
-                                       "Shaded: within 2× of the observed area.  Darker bars: too large; "
-                                       "lighter: too small.")
+    fig = new_page("Burned area bias per case",
+                   "Simulated / observed burned area, one bar per scored case, sorted.  Dark: too large; light: "
+                   "too small; shaded: within 2×; beyond 1/256× – 256× drawn at the edge.")
     ratios = {}
     for mc in MODELS:
         r = _values(cases, mc, "ratio_of_areas")
@@ -355,49 +384,17 @@ def bias_page(cases: list[Case]) -> plt.Figure:
         if r.size:
             ratios[mc.label] = np.log2(np.clip(r, 1 / RATIO_CLIP, RATIO_CLIP))
     every = np.concatenate(list(ratios.values())) if ratios else np.array([0.0])
-    lo, hi = np.floor(min(-2, every.min())) - 0.5, np.ceil(max(2, every.max())) + 0.5
-    bins = np.arange(lo, hi + 0.01, 0.5)
-    axes = fig.subplots(len(MODELS), 1, sharex=True,
-                        gridspec_kw=dict(left=0.07, right=0.72, top=0.86, bottom=0.1, hspace=0.25))
-    for i, (ax, mc) in enumerate(zip(np.atleast_1d(axes), MODELS)):
-        ax.set_title(mc.label)
-        ax.axvspan(-1, 1, color=PANEL, zorder=0)
-        ax.axvline(0, color=INK_3, linewidth=0.8, zorder=1)
-        if mc.label not in ratios:
+    lo, hi = min(-2.0, np.floor(every.min()) - 0.5), max(2.0, np.ceil(every.max()) + 0.5)
+    axes = fig.subplots(1, len(MODELS), sharex=True,
+                        gridspec_kw=dict(left=0.05, right=0.965, top=0.82, bottom=0.1, wspace=0.08))
+    for ax, mc in zip(np.atleast_1d(axes), MODELS):
+        ax.set_title(mc.label, pad=18)
+        if mc.label in ratios:
+            ranked_bias(ax, ratios[mc.label], mc.color, lo, hi)
+        else:
             _no_data(ax)
-            continue
-        v = ratios[mc.label]
-        share = np.histogram(v, bins)[0] / v.size
-        ax.bar(bins[:-1], share, width=0.5, align="edge", color=[tint(mc.color, 0.0) if b >= 0 else tint(mc.color, 0.6)
-                                                                  for b in bins[:-1]],
-               edgecolor="white", linewidth=0.6, zorder=2)
-        med = np.median(v)
-        ax.axvline(med, color=INK, linewidth=1.0, linestyle=(0, (3, 2)), zorder=3)
-        ax.text(med, 1.0, f" median {_ratio_value(2 ** med)}", transform=ax.get_xaxis_transform(),
-                va="top", ha="left", fontsize=7.5)
-        ax.set_ylim(0, share.max() * 1.15)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{100 * y:.0f} %"))
-        ax.set_ylabel("Share of cases")
-        over, within = np.mean(v > 0), np.mean(np.abs(v) <= 1)
-        under_4, over_4 = np.mean(v < -2), np.mean(v > 2)
-        y = ax.get_position().y1 - 0.01
-        _heading(fig, 0.76, y, mc.label, color=INK)
-        fig.add_artist(Line2D([0.76, 0.79], [y - 0.012, y - 0.012], color=mc.color, linewidth=2.5,
-                              solid_capstyle="butt"))
-        stats = [("Cases", f"{v.size:,}"), ("Median ratio", _ratio_value(2 ** med)),
-                 ("Too large (> 1×)", f"{100 * over:.0f} %"), ("Within 2×", f"{100 * within:.0f} %"),
-                 ("Under ¼×", f"{100 * under_4:.0f} %"), ("Over 4×", f"{100 * over_4:.0f} %")]
-        for k, (name, val) in enumerate(stats):
-            fig.text(0.76, y - 0.045 - 0.026 * k, name, color=INK_2)
-            fig.text(0.965, y - 0.045 - 0.026 * k, val, ha="right")
-    ax = np.atleast_1d(axes)[-1]
-    ticks = np.arange(np.ceil(lo / 2) * 2, hi, 2)
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([_ratio_label(2.0 ** t) for t in ticks])
-    ax.set_xlim(lo, hi)
-    ax.set_xlabel("Simulated / observed area")
-    fig.text(0.07, 0.045, "Ratios beyond 1/256× – 256× are counted in the outermost bars.", fontsize=7,
-             color=INK_3)
+        ax.set_xlabel("Simulated / observed area")
+    np.atleast_1d(axes)[0].set_ylabel("Cases, ranked")
     return fig
 
 
