@@ -56,8 +56,7 @@ class ModelConfig:
     label:    str
     toa_path: str                         # relative to the case folder; may contain a * glob
     toa_unit: str   = "s"                 # unit of the TOA raster values: "s", "min" or "h"
-    color:    tuple = (1.0, 0.0, 0.0)     # RGB of its burn mask and curves
-    alpha:    float = 0.35                # opacity of its burn mask on the map
+    color:    str   = "#e34948"           # its burn mask, curves and markers in the report
 
     def find_toa(self, case_dir: Path) -> Path | None:
         """The TOA raster of this model in case_dir (newest match for a glob), or None."""
@@ -74,8 +73,8 @@ class ModelConfig:
 
 
 MODELS: list[ModelConfig] = [
-    ModelConfig("ELMFIRE", "outputs/time_of_arrival_*.tif",            "s",   (1.0, 0.0, 0.0)),
-    ModelConfig("FARSITE", "farsite/outputs/farsite_Arrival Time.tif", "min", (0.0, 0.4, 1.0)),
+    ModelConfig("ELMFIRE", "outputs/time_of_arrival_*.tif",            "s",   "#e34948"),
+    ModelConfig("FARSITE", "farsite/outputs/farsite_Arrival Time.tif", "min", "#2a78d6"),
 ]
 
 
@@ -100,6 +99,7 @@ class Case:
     model_curves: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     sat_curve:    satellite.CoverageCurve | None = None
     sat_end:      pd.Timestamp | None = None   # SatelliteEndTime used to stop the simulations
+    start:        pd.Timestamp | None = None   # SatelliteIgnitionTime = simulation time 0 (UTC)
 
     def score(self, model: ModelConfig, metric: str) -> float:
         return float(self.metrics.get(f"{model.key}_{metric}", np.nan))
@@ -290,4 +290,5 @@ def evaluate_case(case_dir: Path) -> Case:
         model_curves = curves,
         sat_curve    = _satellite_curve(case_dir, observed, sat_start),
         sat_end      = sat_end if pd.notna(sat_end) else None,
+        start        = sat_start if pd.notna(sat_start) else None,
     )

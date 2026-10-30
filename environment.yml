@@ -17,5 +17,6 @@ dependencies:
   - gdal            # gdal_translate, ogr2ogr, gdalbuildvrt, gdalsrsinfo
   - libgdal-grib    # GDAL GRIB driver, reads HRRR
   - matplotlib
+  - pypdf          # optional: bookmarks in the validation report
   - requests
   - windninja       # WindNinja_cli

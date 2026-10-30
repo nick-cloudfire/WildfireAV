@@ -1,230 +1,484 @@
 """
 Report pages that summarise all cases:
 
-    cover       case counts and the 10 best / worst cases of each model
-    wind        scores against mean wind speed, one column per model
-    size        scores against burned area and simulated duration (log axes)
-    bias        simulated / observed area of every case, log2 scale
-    histograms  distribution of each score, one row per model
+    cover          case counts, headline scores of each model, how to read the report
+    rankings       the 10 best and 10 worst cases of each model, by Jaccard
+    distributions  histogram and cumulative distribution of each score, models overlaid
+    model vs model each case's Jaccard and area ratio, ELMFIRE against FARSITE
+    area bias      distribution of simulated / observed area, log2 scale
+    conditions     Jaccard and area ratio against wind, fire size and duration,
+                   with binned medians (Sørensen = 2J / (1 + J), so it adds nothing here)
 
 Only cases that ignited in at least one model are summarised
-(see getValidationPDF.NOT_IGNITED_JACCARD).
+(see getValidationPDF.NOT_IGNITED_JACCARD); the worst-case list also leaves
+out cases where that model did not ignite.
 """
 
 from __future__ import annotations
 
+from datetime import date
+
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Patch
+import pandas as pd
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyBboxPatch, Patch
+from matplotlib.ticker import FixedLocator, FuncFormatter, LogLocator, NullFormatter, NullLocator
 
 from caseMetrics import M2_TO_ACRES, MODELS, Case
-from casePage import A4_LANDSCAPE
+from reportStyle import INK, INK_2, INK_3, PANEL, RULE, new_page, tint
 
 SCORES = [("jaccard", "Jaccard"), ("sorensen", "Sørensen"), ("kappa", "Cohen's κ")]
+RATIO_CLIP = 2.0 ** 8        # area ratios beyond 1/256x .. 256x are drawn at the edge
+MIN_PER_BIN = 15             # binned medians: at least this many cases per bin
 
 
-def _figure(rows: int, cols: int, title: str):
-    fig, axes = plt.subplots(rows, cols, figsize=A4_LANDSCAPE, squeeze=False)
-    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.99)
-    return fig, axes
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
 
-
-def _no_data(ax) -> None:
-    ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center", color="gray")
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-
-def _values(cases: list[Case], model, attr_or_score: str) -> np.ndarray:
-    """One value per case that has this model's output: a Case attribute or a score."""
+def _values(cases: list[Case], model, what: str) -> np.ndarray:
+    """One value per case that has this model's output: a case attribute or a score."""
     out = []
     for c in cases:
         if not c.model_toas.get(model.label):
             continue
-        if attr_or_score == "observed_acres":
+        if what == "observed_acres":
             out.append(c.observed_m2 * M2_TO_ACRES)
-        elif attr_or_score in ("duration_h", "avg_wind_kph"):
-            out.append(getattr(c, attr_or_score) or np.nan)
+        elif what in ("duration_h", "avg_wind_kph"):
+            out.append(getattr(c, what) or np.nan)
         else:
-            out.append(c.score(model, attr_or_score))
+            out.append(c.score(model, what))
     return np.asarray(out, dtype=float)
 
 
-def _fit_line(ax, x, y, color, log_x: bool = False, y_pos: float = 0.04) -> None:
-    """Least-squares line (in log10 x if log_x) with its R² and equation."""
-    if x.size < 3:
-        return
-    xf = np.log10(x) if log_x else x
-    slope, intercept = np.polyfit(xf, y, 1)
-    r2 = np.corrcoef(xf, y)[0, 1] ** 2
-    xs = np.sort(x)
-    ax.plot(xs, slope * (np.log10(xs) if log_x else xs) + intercept,
-            color=color, linewidth=1.2, linestyle="--", alpha=0.85, zorder=4)
-    eq = f"y={slope:+.3f}·log₁₀(x){intercept:+.3f}" if log_x else f"y={slope:+.4f}·x{intercept:+.3f}"
-    ax.text(0.02, y_pos, f"R²={r2:.3f}  {eq}", transform=ax.transAxes, fontsize=6.5, color=color,
-            va="bottom", bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.7, lw=0.6))
+def _finite(*arrays):
+    ok = np.logical_and.reduce([np.isfinite(a) for a in arrays])
+    return [a[ok] for a in arrays]
+
+
+def _ratio_label(v: float) -> str:
+    """Axis label of a power of two: 4×, 1×, 1/4×."""
+    return f"{v:g}×" if v >= 1 else f"1/{1 / v:g}×"
+
+
+def _ratio_value(v: float) -> str:
+    """An area ratio as a number: 1.2×, 0.31×, 0.011×."""
+    if not np.isfinite(v) or v <= 0:
+        return "–"
+    return f"{v:.2f}×" if 0.1 <= v < 10 else f"{v:.2g}×" if v < 0.1 else f"{v:,.0f}×"
+
+
+# ---------------------------------------------------------------------------
+# Small drawing helpers
+# ---------------------------------------------------------------------------
+
+def _no_data(ax) -> None:
+    ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center", color=INK_3)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def _heading(fig, x: float, y: float, text: str, color=INK) -> None:
+    fig.text(x, y, text, fontsize=10, fontweight="bold", va="baseline", color=color)
+
+
+def _model_legend(fig, y: float = 0.875, x: float = 0.965) -> None:
+    fig.legend([Line2D([], [], color=mc.color, linewidth=2.2) for mc in MODELS], [mc.label for mc in MODELS],
+               loc="upper right", bbox_to_anchor=(x, y + 0.035), ncol=len(MODELS), fontsize=8.5,
+               handlelength=1.6, columnspacing=1.4)
+
+
+def _table(fig, x0: float, y0: float, widths: list[float], header: list[str], rows: list[list[str]],
+           align: list[str], row_h: float = 0.026, bold_col: int | None = None) -> float:
+    """Plain table drawn with figure text: header on a light panel, hairline rules. Returns its bottom."""
+    width = sum(widths)
+    fig.add_artist(FancyBboxPatch((x0, y0 - row_h), width, row_h, boxstyle="square,pad=0",
+                                  transform=fig.transFigure, facecolor=PANEL, edgecolor="none"))
+    xs = np.cumsum([0] + widths[:-1]) + x0
+    pos = lambda i: xs[i] + (widths[i] - 0.006 if align[i] == "right" else 0.006)
+    for i, h in enumerate(header):
+        fig.text(pos(i), y0 - row_h / 2, h, ha=align[i], va="center", fontsize=7.5, fontweight="bold",
+                 color=INK_2)
+    y = y0 - row_h
+    for r in rows:
+        for i, v in enumerate(r):
+            fig.text(pos(i), y - row_h / 2, v, ha=align[i], va="center", fontsize=8,
+                     fontweight="bold" if i == bold_col else "normal")
+        y -= row_h
+        fig.add_artist(Line2D([x0, x0 + width], [y, y], color=RULE, linewidth=0.5))
+    return y
+
+
+def _stat_tile(fig, x: float, y: float, w: float, h: float, value: str, label: str, note: str = "") -> None:
+    fig.add_artist(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=0.008",
+                                  transform=fig.transFigure, facecolor=PANEL, edgecolor="none"))
+    fig.text(x + 0.014, y + h - 0.022, label, fontsize=8, color=INK_2, va="top")
+    fig.text(x + 0.014, y + 0.022, value, fontsize=22, fontweight="bold", va="baseline")
+    if note:
+        fig.text(x + w - 0.014, y + 0.024, note, fontsize=7.5, color=INK_3, va="baseline", ha="right")
+
+
+# ---------------------------------------------------------------------------
+# Cover
+# ---------------------------------------------------------------------------
+
+def _headline_rows(cases: list[Case]) -> list[list[str]]:
+    rows = []
+    for mc in MODELS:
+        j = _finite(_values(cases, mc, "jaccard"))[0]
+        s = _finite(_values(cases, mc, "sorensen"))[0]
+        k = _finite(_values(cases, mc, "kappa"))[0]
+        r = _values(cases, mc, "ratio_of_areas")
+        r = r[np.isfinite(r) & (r > 0)]
+        if not j.size:
+            rows.append([mc.label, "0"] + ["–"] * 6)
+            continue
+        rows.append([mc.label, f"{j.size:,}", f"{np.median(j):.3f}", f"{j.mean():.3f}", f"{np.median(s):.3f}",
+                     f"{np.median(k):.3f}", _ratio_value(np.median(r)) if r.size else "–",
+                     f"{100 * np.mean((r >= 0.5) & (r <= 2)):.0f} %" if r.size else "–"])
+    return rows
 
 
 def cover_page(n_total: int, n_failed: int, ignited: list[Case], not_ignited: list[Case],
                jaccard_cutoff: float) -> plt.Figure:
-    fig = plt.figure(figsize=A4_LANDSCAPE)
-    fig.suptitle("Validation Report — Summary", fontsize=14, fontweight="bold", y=0.99)
-    grid = fig.add_gridspec(3, len(MODELS), height_ratios=[0.10, 0.45, 0.45], hspace=0.45,
-                            wspace=0.12, left=0.04, right=0.98, top=0.93, bottom=0.02)
-    ax = fig.add_subplot(grid[0, :])
-    ax.axis("off")
-    ax.text(0.5, 0.5,
-            f"Cases: {n_total}     Evaluated: {len(ignited)}     "
-            f"Did not ignite (Jaccard < {jaccard_cutoff:.2f}): {len(not_ignited)}     "
-            f"No model output: {n_failed}",
-            ha="center", va="center", fontsize=10, family="monospace", transform=ax.transAxes,
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="#e8e8e8", linewidth=0))
+    names = " and ".join(mc.label for mc in MODELS)
+    fig = new_page("WildfireAV — fire spread model validation",
+                   f"{names} simulations of real fires, scored against the mapped MTBS burn perimeter"
+                   f"   ·   generated {date.today():%d %B %Y}")
 
-    header = ["Case", "Fire", "Jaccard", "Sørensen", "κ"]
+    tiles = [(f"{n_total:,}", "Cases", ""),
+             (f"{len(ignited):,}", "Scored", "ignited in at least one model"),
+             (f"{len(not_ignited):,}", "Did not ignite", f"best Jaccard < {jaccard_cutoff:g}"),
+             (f"{n_failed:,}", "No model output", "no arrival-time raster")]
+    gap = 0.012
+    w = (0.93 - 3 * gap) / 4
+    for i, (v, label, note) in enumerate(tiles):
+        _stat_tile(fig, 0.035 + i * (w + gap), 0.745, w, 0.12, v, label, note)
+
+    _heading(fig, 0.035, 0.685, f"Headline scores  (the {len(ignited):,} scored cases)")
+    header = ["Model", "Cases", "Median Jaccard", "Mean Jaccard", "Median Sørensen", "Median κ",
+              "Median area ratio", "Area within 2×"]
+    bottom = _table(fig, 0.035, 0.665, [0.12, 0.08, 0.12, 0.11, 0.13, 0.1, 0.135, 0.135], header,
+                    _headline_rows(ignited), ["left"] + ["right"] * 7, row_h=0.034, bold_col=0)
+    for i, mc in enumerate(MODELS):
+        y = 0.665 - 0.034 * (i + 1.5)
+        fig.add_artist(Line2D([0.035, 0.035], [y - 0.011, y + 0.011], color=mc.color, linewidth=3,
+                              solid_capstyle="butt"))
+
+    _heading(fig, 0.035, bottom - 0.065, "Reading the report")
+    notes = [
+        ("Scores", "Each model's burned cells are compared, cell by cell, with the rasterised MTBS perimeter. "
+                   "Jaccard = overlap / union (0 to 1). Sørensen = 2·overlap / (simulated + observed) = 2J / (1 + J). "
+                   "Cohen's κ = agreement beyond chance over the whole raster."),
+        ("Area ratio", "Simulated / observed burned area: above 1× the model burned too much, below 1× too little. "
+                       "\"Area within 2×\" is the share of cases between ½× and 2×."),
+        ("Time window", "Every simulation starts at the satellite ignition (5 % of the fire covered by VIIRS / MODIS "
+                        "hotspots) and stops when 90 % is covered, or at the reported fire-out time."),
+        ("Case pages", "One page per fire: a map per model (both colours = simulated and observed, light = "
+                       "simulated only, grey = observed but missed), the scores, and burned area over time "
+                       "against the satellite detections."),
+    ]
+    y = bottom - 0.1
+    for k, v in notes:
+        fig.text(0.035, y, k, fontweight="bold", va="top", fontsize=8.5)
+        t = fig.text(0.135, y, v, va="top", fontsize=8.5, color=INK_2, wrap=True)
+        t._get_wrap_line_width = lambda: 0.82 * fig.get_size_inches()[0] * fig.dpi
+        y -= 0.058
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Rankings
+# ---------------------------------------------------------------------------
+
+def rankings_page(cases: list[Case], jaccard_cutoff: float) -> plt.Figure:
+    fig = new_page("Best and worst cases", f"Ranked by Jaccard.  Worst-case lists leave out cases where that "
+                                           f"model did not ignite (Jaccard < {jaccard_cutoff:g}).")
+    widths = [0.05, 0.15, 0.04, 0.055, 0.06, 0.045, 0.055]
+    header = ["Case", "Fire", "Year", "Jaccard", "Sørensen", "κ", "Area ratio"]
+    align = ["left", "left", "right", "right", "right", "right", "right"]
     for col, mc in enumerate(MODELS):
-        ranked = sorted((c for c in ignited if np.isfinite(c.score(mc, "jaccard"))),
-                        key=lambda c: c.score(mc, "jaccard"), reverse=True)
-        for row, (title, subset) in enumerate((("Top 10 by Jaccard", ranked[:10]),
-                                               ("Bottom 10 by Jaccard", ranked[::-1][:10])), start=1):
-            ax = fig.add_subplot(grid[row, col])
-            ax.axis("off")
-            ax.set_title(f"{mc.label} — {title}", fontsize=9, fontweight="bold", color=mc.color, pad=3)
-            if not subset:
-                _no_data(ax)
+        scored = [c for c in cases if np.isfinite(c.score(mc, "jaccard"))]
+        ranked = sorted(scored, key=lambda c: c.score(mc, "jaccard"), reverse=True)
+        worst = [c for c in ranked if c.score(mc, "jaccard") >= jaccard_cutoff][::-1]
+        x = 0.035 + col * 0.475
+        for row, (title, subset) in enumerate(((f"{mc.label} — 10 best", ranked[:10]),
+                                               (f"{mc.label} — 10 worst that ignited", worst[:10]))):
+            top = 0.865 - row * 0.41
+            _heading(fig, x, top, title)
+            fig.add_artist(Line2D([x, x + 0.03], [top - 0.012, top - 0.012], color=mc.color, linewidth=2.5,
+                                  solid_capstyle="butt"))
+            rows = [[c.case_id, (c.fire_name or "")[:22], f"{c.fire_year or ''}",
+                     f"{c.score(mc, 'jaccard'):.3f}", f"{c.score(mc, 'sorensen'):.3f}",
+                     f"{c.score(mc, 'kappa'):.3f}", _ratio_value(c.score(mc, "ratio_of_areas"))] for c in subset]
+            if rows:
+                _table(fig, x, top - 0.025, widths, header, rows, align, row_h=0.028, bold_col=3)
+            else:
+                fig.text(x, top - 0.05, "no cases", color=INK_3)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Distributions
+# ---------------------------------------------------------------------------
+
+def distribution_page(cases: list[Case]) -> plt.Figure:
+    fig = new_page("Score distributions", "Top: share of cases per score bin.  Bottom: share of cases at or "
+                                          "below each score; a curve further right is the better model.  "
+                                          "Dashed: median.")
+    _model_legend(fig)
+    axes = fig.subplots(2, len(SCORES), gridspec_kw=dict(left=0.06, right=0.965, top=0.84, bottom=0.1,
+                                                          hspace=0.32, wspace=0.18))
+    bins = np.linspace(0, 1, 26)
+    for col, (key, label) in enumerate(SCORES):
+        hist, cdf = axes[0, col], axes[1, col]
+        hist.set_title(label)
+        top = 0.0
+        for mc in MODELS:
+            v = _finite(_values(cases, mc, key))[0]
+            if not v.size:
                 continue
-            cells = [[c.case_id, (c.fire_name or "")[:16]] + [f"{c.score(mc, k):.3f}" for k, _ in SCORES]
-                     for c in subset]
-            table = ax.table(cellText=cells, colLabels=header, loc="center", cellLoc="center",
-                             bbox=[0, 0, 1, 1])
-            table.auto_set_font_size(False)
-            table.set_fontsize(7.5)
-            for (r, _), cell in table.get_celld().items():
-                cell.set_facecolor("#b0b0b0" if r == 0 else "#f0f0f0" if r % 2 == 0 else "white")
-                if r == 0:
-                    cell.set_text_props(fontweight="bold")
+            share = np.histogram(np.clip(v, 0, 1), bins)[0] / v.size
+            top = max(top, share.max())
+            hist.stairs(share, bins, color=mc.color, linewidth=1.4, fill=False)
+            hist.stairs(share, bins, color=tint(mc.color, 0.8), fill=True, alpha=0.6)
+            med = np.median(v)
+            xs = np.sort(v)
+            cdf.plot(np.r_[0, xs], np.r_[0, np.arange(1, xs.size + 1) / xs.size], color=mc.color,
+                     drawstyle="steps-post")
+            cdf.plot([med, med], [0, 0.5], color=mc.color, linewidth=0.8, linestyle=(0, (2, 2)))
+            hist.axvline(med, color=mc.color, linewidth=0.8, linestyle=(0, (2, 2)))
+        if top == 0:
+            _no_data(hist)
+            _no_data(cdf)
+            continue
+        hist.set_xlim(0, 1)
+        hist.set_ylim(0, top * 1.12)
+        hist.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{100 * v:.0f} %"))
+        cdf.set_xlim(0, 1)
+        cdf.set_ylim(0, 1.01)
+        cdf.axhline(0.5, color=RULE, linewidth=0.8, zorder=1)
+        cdf.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{100 * v:.0f} %"))
+        cdf.set_xlabel(label)
+        if col == 0:
+            hist.set_ylabel("Share of cases")
+            cdf.set_ylabel("Share of cases at or below")
     return fig
 
 
-def wind_page(cases: list[Case]) -> plt.Figure:
-    fig, axes = _figure(len(SCORES), len(MODELS), "Scores vs. Mean Wind Speed (ERA5 10 m, km/h)")
-    for col, mc in enumerate(MODELS):
-        x = _values(cases, mc, "avg_wind_kph")
-        for row, (key, label) in enumerate(SCORES):
-            ax = axes[row, col]
-            ax.set_ylim(-0.05, 1.05)
-            ax.grid(True, alpha=0.3, linewidth=0.5)
-            ax.set_ylabel(label if col == 0 else "")
-            ax.set_title(mc.label if row == 0 else "")
-            if row == len(SCORES) - 1:
-                ax.set_xlabel("Mean wind speed (km/h)")
-            y = _values(cases, mc, key)
-            ok = np.isfinite(x) & np.isfinite(y)
-            if not ok.any():
-                _no_data(ax)
-                continue
-            ax.scatter(x[ok], y[ok], color=mc.color, alpha=0.65, s=18, zorder=3)
-            _fit_line(ax, x[ok], y[ok], mc.color)
-            ax.text(0.98, 0.95, f"n={ok.sum()}", transform=ax.transAxes, ha="right", va="top", fontsize=8)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+# ---------------------------------------------------------------------------
+# Model against model
+# ---------------------------------------------------------------------------
+
+def model_vs_model_page(cases: list[Case]) -> plt.Figure | None:
+    if len(MODELS) != 2:
+        return None
+    a, b = MODELS
+    both = [c for c in cases if c.model_toas.get(a.label) and c.model_toas.get(b.label)]
+    fig = new_page(f"{a.label} against {b.label}",
+                   f"The {len(both):,} scored cases with output from both models; one dot per case.  "
+                   f"Area ratio: shaded = within 2× of the observed area; beyond 1/256× – 256× drawn at the edge.")
+    ax_j, ax_r = fig.subplots(1, 2, gridspec_kw=dict(left=0.07, right=0.965, top=0.84, bottom=0.1, wspace=0.22))
+
+    ja, jb = _finite(np.array([c.score(a, "jaccard") for c in both]), np.array([c.score(b, "jaccard") for c in both]))
+    ax_j.set_title("Jaccard")
+    if ja.size:
+        ax_j.scatter(ja, jb, s=9, color=INK, alpha=0.35, linewidths=0, zorder=3)
+        ax_j.plot([0, 1], [0, 1], color=INK_3, linewidth=0.8, zorder=2)
+        a_wins, b_wins = int((ja > jb).sum()), int((jb > ja).sum())
+        ax_j.text(0.97, 0.04, f"{a.label} higher\n{a_wins:,} cases ({100 * a_wins / ja.size:.0f} %)",
+                  transform=ax_j.transAxes, ha="right", va="bottom", color=a.color, fontweight="bold")
+        ax_j.text(0.03, 0.96, f"{b.label} higher\n{b_wins:,} cases ({100 * b_wins / ja.size:.0f} %)",
+                  transform=ax_j.transAxes, ha="left", va="top", color=b.color, fontweight="bold")
+        ax_j.set_xlim(0, 1)
+        ax_j.set_ylim(0, 1)
+        ax_j.set_aspect("equal")
+    else:
+        _no_data(ax_j)
+    ax_j.set_xlabel(f"{a.label} Jaccard")
+    ax_j.set_ylabel(f"{b.label} Jaccard")
+
+    ra, rb = _finite(np.array([c.score(a, "ratio_of_areas") for c in both]),
+                     np.array([c.score(b, "ratio_of_areas") for c in both]))
+    keep = (ra > 0) & (rb > 0)
+    ra, rb = np.clip(ra[keep], 1 / RATIO_CLIP, RATIO_CLIP), np.clip(rb[keep], 1 / RATIO_CLIP, RATIO_CLIP)
+    ax_r.set_title("Area ratio  (simulated / observed)")
+    if ra.size:
+        lo = min(ra.min(), rb.min(), 0.25) / 1.5
+        hi = max(ra.max(), rb.max(), 4) * 1.5
+        ax_r.set_xscale("log", base=2)
+        ax_r.set_yscale("log", base=2)
+        ax_r.axvspan(0.5, 2, color=PANEL, zorder=0)
+        ax_r.axhspan(0.5, 2, color=PANEL, zorder=0)
+        ax_r.axvline(1, color=INK_3, linewidth=0.8, zorder=1)
+        ax_r.axhline(1, color=INK_3, linewidth=0.8, zorder=1)
+        ax_r.plot([lo, hi], [lo, hi], color=RULE, linewidth=0.8, zorder=1)
+        ax_r.scatter(ra, rb, s=9, color=INK, alpha=0.35, linewidths=0, zorder=3)
+        ax_r.set_xlim(lo, hi)
+        ax_r.set_ylim(lo, hi)
+        ax_r.set_aspect("equal")
+        _ratio_axis(ax_r.xaxis, lo, hi)
+        _ratio_axis(ax_r.yaxis, lo, hi)
+        quads = [((ra > 1) & (rb > 1), 0.97, 0.97, "both too large", "right", "top"),
+                 ((ra < 1) & (rb < 1), 0.03, 0.03, "both too small", "left", "bottom")]
+        for mask, x, y, text, ha, va in quads:
+            ax_r.text(x, y, f"{text}: {mask.sum():,} ({100 * mask.mean():.0f} %)", transform=ax_r.transAxes,
+                      ha=ha, va=va, color=INK_2, fontsize=7.5, zorder=5,
+                      bbox=dict(boxstyle="square,pad=0.25", fc="white", ec="none", alpha=0.85))
+    else:
+        _no_data(ax_r)
+    ax_r.set_xlabel(f"{a.label} area ratio")
+    ax_r.set_ylabel(f"{b.label} area ratio")
     return fig
 
 
-def size_page(cases: list[Case]) -> plt.Figure:
-    columns = [("observed_acres", "Observed burned area (acres)"), ("duration_h", "Simulated duration (hours)")]
-    fig, axes = _figure(len(SCORES), len(columns), "Scores vs. Fire Size and Duration")
-    for col, (x_key, x_label) in enumerate(columns):
-        for row, (key, label) in enumerate(SCORES):
-            ax = axes[row, col]
-            ax.set_ylim(-0.05, 1.05)
-            ax.set_xscale("log")
-            ax.grid(True, alpha=0.3, linewidth=0.5)
-            ax.set_ylabel(label if col == 0 else "")
-            ax.set_title(x_label.split(" (")[0] if row == 0 else "")
-            if row == len(SCORES) - 1:
-                ax.set_xlabel(x_label)
-            y_pos = 0.04                     # stack the fit labels of the models
-            for mc in MODELS:
-                x, y = _values(cases, mc, x_key), _values(cases, mc, key)
-                ok = np.isfinite(x) & np.isfinite(y) & (x > 0)
-                if ok.any():
-                    ax.scatter(x[ok], y[ok], color=mc.color, alpha=0.65, s=18, zorder=3,
-                               label=f"{mc.label} (n={ok.sum()})")
-                    _fit_line(ax, x[ok], y[ok], mc.color, log_x=True, y_pos=y_pos)
-                    y_pos += 0.12
-            if row == 0 and col == 0:
-                ax.legend(fontsize=7, loc="lower right")
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    return fig
+def _ratio_axis(axis, lo: float, hi: float) -> None:
+    ticks = [2.0 ** e for e in range(-12, 13, 2) if lo <= 2.0 ** e <= hi]
+    axis.set_major_locator(FixedLocator(ticks))
+    axis.set_major_formatter(FuncFormatter(lambda v, _: _ratio_label(v)))
+    axis.set_minor_locator(NullLocator())
 
+
+# ---------------------------------------------------------------------------
+# Area bias
+# ---------------------------------------------------------------------------
 
 def bias_page(cases: list[Case]) -> plt.Figure:
-    """Horizontal bar per case of log2(simulated / observed area), sorted; shared x axis."""
-    log2 = {}
+    fig = new_page("Burned area bias", "Simulated / observed burned area of every scored case, log scale.  "
+                                       "Shaded: within 2× of the observed area.  Darker bars: too large; "
+                                       "lighter: too small.")
+    ratios = {}
     for mc in MODELS:
-        ratio = _values(cases, mc, "ratio_of_areas")
-        ratio = ratio[np.isfinite(ratio) & (ratio > 0)]
-        if ratio.size:
-            log2[mc.label] = np.sort(np.log2(ratio))
-    every = np.concatenate(list(log2.values())) if log2 else np.array([0.0])
-    lo = min(-2.0, 1.2 * every.min())        # always show at least 1/4x .. 4x
-    hi = max(2.0, 1.2 * every.max())
-    ticks = np.arange(np.ceil(lo), np.floor(hi) + 1).astype(int)
-
-    fig, axes = _figure(1, len(MODELS), "Burned Area Bias per Case   (simulated / observed, log₂ scale)")
-    for ax, mc in zip(axes[0], MODELS):
+        r = _values(cases, mc, "ratio_of_areas")
+        r = r[np.isfinite(r) & (r > 0)]
+        if r.size:
+            ratios[mc.label] = np.log2(np.clip(r, 1 / RATIO_CLIP, RATIO_CLIP))
+    every = np.concatenate(list(ratios.values())) if ratios else np.array([0.0])
+    lo, hi = np.floor(min(-2, every.min())) - 0.5, np.ceil(max(2, every.max())) + 0.5
+    bins = np.arange(lo, hi + 0.01, 0.5)
+    axes = fig.subplots(len(MODELS), 1, sharex=True,
+                        gridspec_kw=dict(left=0.07, right=0.72, top=0.86, bottom=0.1, hspace=0.25))
+    for i, (ax, mc) in enumerate(zip(np.atleast_1d(axes), MODELS)):
         ax.set_title(mc.label)
-        ax.set_xlim(lo, hi)
-        if mc.label not in log2:
+        ax.axvspan(-1, 1, color=PANEL, zorder=0)
+        ax.axvline(0, color=INK_3, linewidth=0.8, zorder=1)
+        if mc.label not in ratios:
             _no_data(ax)
             continue
-        v = log2[mc.label]
-        ax.barh(np.arange(v.size), v, height=0.85,
-                color=[(*mc.color, 0.75) if x >= 0 else (0.5, 0.5, 0.5, 0.65) for x in v])
-        ax.axvline(0, color="black", linewidth=1.0, zorder=5)
-        for t in ticks[ticks != 0]:
-            ax.axvline(t, color="gray", linestyle=":", linewidth=0.7, alpha=0.55, zorder=3)
-        ax.set_xticks(ticks)
-        ax.set_xticklabels([f"{2 ** t:.0f}×" if t >= 0 else f"1/{2 ** -t:.0f}×" for t in ticks], fontsize=9)
-        ax.set_xlabel("simulated / observed area")
-        ax.set_yticks([])
-        ax.grid(True, axis="x", alpha=0.25, linewidth=0.5)
-        over = int((v > 0).sum())
-        ax.text(0.98, 0.01, f"n = {v.size}\nmedian ratio = {np.median(2 ** v):.2f}×\n"
-                            f"overestimated: {over}/{v.size} ({100 * over / v.size:.0f}%)",
-                transform=ax.transAxes, fontsize=7, ha="right", va="bottom",
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8, linewidth=0.6))
-        ax.legend(handles=[Patch(color=mc.color, alpha=0.8, label="Overestimate (ratio > 1)"),
-                           Patch(color=(0.5, 0.5, 0.5), alpha=0.75, label="Underestimate (ratio < 1)")],
-                  fontsize=7, loc="upper left")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+        v = ratios[mc.label]
+        share = np.histogram(v, bins)[0] / v.size
+        ax.bar(bins[:-1], share, width=0.5, align="edge", color=[tint(mc.color, 0.0) if b >= 0 else tint(mc.color, 0.6)
+                                                                  for b in bins[:-1]],
+               edgecolor="white", linewidth=0.6, zorder=2)
+        med = np.median(v)
+        ax.axvline(med, color=INK, linewidth=1.0, linestyle=(0, (3, 2)), zorder=3)
+        ax.text(med, 1.0, f" median {_ratio_value(2 ** med)}", transform=ax.get_xaxis_transform(),
+                va="top", ha="left", fontsize=7.5)
+        ax.set_ylim(0, share.max() * 1.15)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{100 * y:.0f} %"))
+        ax.set_ylabel("Share of cases")
+        over, within = np.mean(v > 0), np.mean(np.abs(v) <= 1)
+        under_4, over_4 = np.mean(v < -2), np.mean(v > 2)
+        y = ax.get_position().y1 - 0.01
+        _heading(fig, 0.76, y, mc.label, color=INK)
+        fig.add_artist(Line2D([0.76, 0.79], [y - 0.012, y - 0.012], color=mc.color, linewidth=2.5,
+                              solid_capstyle="butt"))
+        stats = [("Cases", f"{v.size:,}"), ("Median ratio", _ratio_value(2 ** med)),
+                 ("Too large (> 1×)", f"{100 * over:.0f} %"), ("Within 2×", f"{100 * within:.0f} %"),
+                 ("Under ¼×", f"{100 * under_4:.0f} %"), ("Over 4×", f"{100 * over_4:.0f} %")]
+        for k, (name, val) in enumerate(stats):
+            fig.text(0.76, y - 0.045 - 0.026 * k, name, color=INK_2)
+            fig.text(0.965, y - 0.045 - 0.026 * k, val, ha="right")
+    ax = np.atleast_1d(axes)[-1]
+    ticks = np.arange(np.ceil(lo / 2) * 2, hi, 2)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([_ratio_label(2.0 ** t) for t in ticks])
+    ax.set_xlim(lo, hi)
+    ax.set_xlabel("Simulated / observed area")
+    fig.text(0.07, 0.045, "Ratios beyond 1/256× – 256× are counted in the outermost bars.", fontsize=7,
+             color=INK_3)
     return fig
 
 
-def histogram_page(cases: list[Case]) -> plt.Figure:
-    fig, axes = _figure(len(MODELS), len(SCORES), "Score Distributions")
-    for row, mc in enumerate(MODELS):
-        for col, (key, label) in enumerate(SCORES):
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+
+def _binned_median(ax, x, y, color, log_x: bool) -> None:
+    n_bins = int(min(10, x.size // MIN_PER_BIN))
+    if n_bins < 2:
+        return
+    edges = np.unique(np.quantile(x, np.linspace(0, 1, n_bins + 1)))
+    idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, len(edges) - 2)
+    centres, med, q1, q3 = [], [], [], []
+    for b in range(len(edges) - 1):
+        sel = y[idx == b]
+        if sel.size < 3:
+            continue
+        xb = x[idx == b]
+        centres.append(np.exp(np.mean(np.log(xb))) if log_x else np.mean(xb))
+        med.append(np.median(sel))
+        q1.append(np.quantile(sel, 0.25))
+        q3.append(np.quantile(sel, 0.75))
+    ax.fill_between(centres, q1, q3, color=color, alpha=0.12, linewidth=0, zorder=2)
+    ax.plot(centres, med, color=color, linewidth=1.8, marker="o", markersize=3, zorder=4)
+
+
+def conditions_page(cases: list[Case]) -> plt.Figure:
+    fig = new_page("Scores against fire conditions",
+                   "Dots: cases.  Lines: median of cases binned by the x value (equal-count bins); band: "
+                   "middle 50 %.  ρ: Spearman rank correlation.  Area ratio: shaded = within 2×.")
+    _model_legend(fig)
+    columns = [("avg_wind_kph", "Mean wind speed (km/h, ERA5 10 m)", False),
+               ("observed_acres", "Observed burned area (acres)", True),
+               ("duration_h", "Simulated duration (hours)", True)]
+    rows = [("jaccard", "Jaccard"), ("ratio_of_areas", "Area ratio (sim / obs)")]
+    axes = fig.subplots(len(rows), len(columns), gridspec_kw=dict(left=0.07, right=0.965, top=0.83, bottom=0.1,
+                                                                   hspace=0.3, wspace=0.16))
+    for col, (xkey, xlabel, log_x) in enumerate(columns):
+        for row, (ykey, ylabel) in enumerate(rows):
             ax = axes[row, col]
-            ax.set_xlim(-0.05, 1.05)
-            ax.grid(True, alpha=0.3, axis="y")
-            ax.set_title(label if row == 0 else "")
-            ax.set_ylabel(f"{mc.label}\nCases" if col == 0 else "")
-            if row == len(MODELS) - 1:
-                ax.set_xlabel("Score")
-            v = _values(cases, mc, key)
-            v = v[np.isfinite(v)]
-            if not v.size:
+            ratio = ykey == "ratio_of_areas"
+            texts = []
+            for mc in MODELS:
+                x, y = _finite(_values(cases, mc, xkey), _values(cases, mc, ykey))
+                keep = (x > 0) if log_x else np.ones_like(x, bool)
+                if ratio:
+                    keep &= y > 0
+                x, y = x[keep], y[keep]
+                if ratio:
+                    y = np.clip(y, 1 / 64, 64)
+                if not x.size:
+                    continue
+                ax.scatter(x, y, s=4, color=mc.color, alpha=0.18, linewidths=0, zorder=3)
+                _binned_median(ax, x, y, mc.color, log_x)
+                rho = pd.Series(x).corr(pd.Series(y), method="spearman") if x.size > 2 else np.nan
+                texts.append((mc, rho))
+            if log_x:
+                ax.set_xscale("log")
+            if ratio:
+                ax.set_yscale("log", base=2)
+                ax.axhspan(0.5, 2, color=PANEL, zorder=0)
+                ax.axhline(1, color=INK_3, linewidth=0.8, zorder=1)
+                ax.set_ylim(1 / 64, 64)
+                _ratio_axis(ax.yaxis, 1 / 64, 64)
+            else:
+                ax.set_ylim(0, 1)
+            for k, (mc, rho) in enumerate(texts):
+                ax.text(0.98, 0.97 - 0.075 * k, f"ρ = {rho:+.2f}", transform=ax.transAxes, ha="right", va="top",
+                        fontsize=7.5, color=mc.color, fontweight="bold",
+                        bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.8))
+            if not texts:
                 _no_data(ax)
-                continue
-            ax.hist(v, bins=min(25, max(5, v.size // 3)), range=(0, 1),
-                    color=mc.color, alpha=0.75, edgecolor="white", linewidth=0.5)
-            ax.axvline(v.mean(), color="black", linestyle="--", linewidth=1.2, label=f"mean={v.mean():.3f}")
-            ax.axvline(np.median(v), color="dimgray", linestyle=":", label=f"median={np.median(v):.3f}")
-            ax.legend(fontsize=7, loc="upper left")
-            ax.text(0.98, 0.95, f"n={v.size}", transform=ax.transAxes, ha="right", va="top", fontsize=8)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            if row == len(rows) - 1:
+                ax.set_xlabel(xlabel)
     return fig
 
 
-def summary_pages(cases: list[Case]) -> list[plt.Figure]:
-    return [wind_page(cases), size_page(cases), bias_page(cases), histogram_page(cases)]
+def summary_pages(cases: list[Case], jaccard_cutoff: float) -> list[plt.Figure]:
+    pages = [rankings_page(cases, jaccard_cutoff), distribution_page(cases), model_vs_model_page(cases),
+             bias_page(cases), conditions_page(cases)]
+    return [p for p in pages if p is not None]
